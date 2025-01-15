@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -40,7 +40,7 @@
 /* Network connection setup */
 struct flb_net_setup {
     /* enable/disable keepalive support */
-    char keepalive;
+    int keepalive;
 
     /* max time in seconds that a keepalive connection can be idle */
     int keepalive_idle_timeout;
@@ -68,14 +68,35 @@ struct flb_net_setup {
     /* maximum of times a keepalive connection can be used */
     int keepalive_max_recycle;
 
+    /* enable/disable tcp keepalive */
+    int tcp_keepalive;
+
+    /* interval between the last data packet sent and the first TCP keepalive probe */
+    int tcp_keepalive_time;
+
+    /* the interval between TCP keepalive probes */
+    int tcp_keepalive_interval;
+
+    /* number of unacknowledged probes to consider a connection dead */
+    int tcp_keepalive_probes;
+
     /* dns mode : TCP or UDP */
     char *dns_mode;
 
     /* dns resolver : LEGACY or ASYNC */
     char *dns_resolver;
 
-    /* prioritize ipv4 results when trying to establish a connection*/
+    /* prioritize ipv4 results when trying to establish a connection */
     int   dns_prefer_ipv4;
+
+    /* prioritize ipv6 results when trying to establish a connection */
+    int   dns_prefer_ipv6;
+
+    /* allow this port to be shared */
+    int   share_port;
+
+    /* maximum number of allowed active TCP connections */
+    int max_worker_connections;
 };
 
 /* Defines a host service and it properties */
@@ -145,6 +166,7 @@ int flb_net_socket_blocking(flb_sockfd_t fd);
 int flb_net_socket_nonblocking(flb_sockfd_t fd);
 int flb_net_socket_rcv_buffer(flb_sockfd_t fd, int rcvbuf);
 int flb_net_socket_tcp_fastopen(flb_sockfd_t sockfd);
+int flb_net_socket_tcp_keepalive(flb_sockfd_t fd, struct flb_net_setup *net);
 
 /* Socket handling */
 flb_sockfd_t flb_net_socket_create(int family, int nonblock);
@@ -159,10 +181,10 @@ flb_sockfd_t flb_net_udp_connect(const char *host, unsigned long port,
                                  char *source_addr);
 
 int flb_net_tcp_fd_connect(flb_sockfd_t fd, const char *host, unsigned long port);
-flb_sockfd_t flb_net_server(const char *port, const char *listen_addr);
-flb_sockfd_t flb_net_server_udp(const char *port, const char *listen_addr);
+flb_sockfd_t flb_net_server(const char *port, const char *listen_addr, int share_port);
+flb_sockfd_t flb_net_server_udp(const char *port, const char *listen_addr, int share_port);
 flb_sockfd_t flb_net_server_unix(const char *listen_path, int stream_mode,
-                                 int backlog);
+                                 int backlog, int share_port);
 int flb_net_bind(flb_sockfd_t fd, const struct sockaddr *addr,
                  socklen_t addrlen, int backlog);
 int flb_net_bind_udp(flb_sockfd_t fd, const struct sockaddr *addr,

@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -63,6 +63,7 @@ struct flb_systemd_config {
     int dynamic_tag;
     int max_fields;            /* max number of fields per record */
     int max_entries;           /* max number of records per iteration */
+    size_t threshold;         /* threshold for retriveing journal */
 
 #ifdef FLB_HAVE_SQLDB
     flb_sds_t db_path;

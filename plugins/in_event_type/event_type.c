@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -274,6 +274,7 @@ static int send_traces(struct flb_input_instance *ins)
     span_root = ctr_span_create(ctx, scope_span, "main", NULL);
     if (!span_root) {
         ctr_destroy(ctx);
+        ctr_id_destroy(span_id);
         ctr_opts_exit(&opts);
         return -1;
     }
@@ -313,7 +314,7 @@ static int send_traces(struct flb_input_instance *ins)
     ctr_span_event_set_attribute_string(event, "syscall 3", "write()");
 
     /* add a key/value pair list */
-    kv = cfl_kvlist_create(1);
+    kv = cfl_kvlist_create();
     cfl_kvlist_insert_string(kv, "language", "c");
 
     ctr_span_set_attribute_kvlist(span_root, "my-list", kv);
@@ -406,11 +407,12 @@ static int cb_event_type_init(struct flb_input_instance *ins,
 
     ret = flb_input_config_map_set(ins, (void *) ctx);
     if (ret == -1) {
+        flb_free(ctx);
+
         return -1;
     }
 
     flb_input_set_context(ins, ctx);
-
 
     ctx->type = FLB_EVENT_TYPE_LOGS;
     tmp = (char *) flb_input_get_property("type", ins);
@@ -430,8 +432,11 @@ static int cb_event_type_init(struct flb_input_instance *ins,
     ret = flb_input_set_collector_time(ins, cb_collector_time,
                                        ctx->interval_sec, ctx->interval_nsec, config);
     if (ret < 0) {
+        flb_free(ctx);
+
         return -1;
     }
+
     ctx->coll_fd = ret;
 
     return 0;

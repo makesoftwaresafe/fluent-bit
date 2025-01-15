@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -212,6 +212,18 @@ struct flb_opensearch *flb_os_conf_create(struct flb_output_instance *ins,
             flb_os_conf_destroy(ctx);
             return NULL;
         }
+    }
+
+    if (ctx->compression_str) {
+        if (strcasecmp(ctx->compression_str, "gzip") == 0) {
+            ctx->compression = FLB_OS_COMPRESSION_GZIP;
+        }
+        else {
+            ctx->compression = FLB_OS_COMPRESSION_NONE;
+        }
+    }
+    else {
+        ctx->compression = FLB_OS_COMPRESSION_NONE;
     }
 
 #ifdef FLB_HAVE_AWS

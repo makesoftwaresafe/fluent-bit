@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2023 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -97,6 +97,50 @@ static int send_json_message_response(struct in_elasticsearch_bulk_conn *conn, i
     return 0;
 }
 
+static int send_version_message_response(struct flb_in_elasticsearch *ctx,
+                                         struct in_elasticsearch_bulk_conn *conn, int http_status)
+{
+    size_t    sent;
+    int       len;
+    flb_sds_t out;
+    flb_sds_t resp;
+
+    out = flb_sds_create_size(256);
+    if (!out) {
+        return -1;
+    }
+    resp = flb_sds_create_size(384);
+    if (!resp) {
+        flb_sds_destroy(out);
+        return -1;
+    }
+
+    flb_sds_printf(&resp,
+                   ES_VERSION_RESPONSE_TEMPLATE,
+                   ctx->es_version);
+
+    len = flb_sds_len(resp);
+
+    if (http_status == 200) {
+        flb_sds_printf(&out,
+                       "HTTP/1.1 200 OK\r\n"
+                       "Content-Type: application/json\r\n"
+                       "Content-Length: %i\r\n\r\n%s",
+                       len, resp);
+    }
+
+    /* We should check this operations result */
+    flb_io_net_write(conn->connection,
+                     (void *) out,
+                     flb_sds_len(out),
+                     &sent);
+
+    flb_sds_destroy(resp);
+    flb_sds_destroy(out);
+
+    return 0;
+}
+
 static int send_dummy_sniffer_response(struct in_elasticsearch_bulk_conn *conn, int http_status,
                                        struct flb_in_elasticsearch *ctx)
 {
@@ -180,7 +224,7 @@ static int send_response(struct in_elasticsearch_bulk_conn *conn, int http_statu
     }
     else if (http_status == 400) {
         flb_sds_printf(&out,
-                       "HTTP/1.1 400 Forbidden\r\n"
+                       "HTTP/1.1 400 Bad Request\r\n"
                        "Server: Fluent Bit v%s\r\n"
                        "Content-Length: %i\r\n\r\n%s",
                        FLB_VERSION_STR,
@@ -315,7 +359,6 @@ static int process_ndpack(struct flb_in_elasticsearch *ctx, flb_sds_t tag, char 
     msgpack_object *obj;
     flb_sds_t tag_from_record = NULL;
     int idx = 0;
-    int cursor = 0;
     flb_sds_t write_op;
     size_t op_str_size = 0;
     int op_ret = FLB_FALSE;
@@ -375,9 +418,9 @@ static int process_ndpack(struct flb_in_elasticsearch *ctx, flb_sds_t tag, char 
                 }
 
                 if (error_op == FLB_FALSE) {
-                    flb_log_event_encoder_reset(&ctx->log_encoder);
+                    flb_log_event_encoder_reset(ctx->log_encoder);
 
-                    ret = flb_log_event_encoder_begin_record(&ctx->log_encoder);
+                    ret = flb_log_event_encoder_begin_record(ctx->log_encoder);
 
                     if (ret != FLB_EVENT_ENCODER_SUCCESS) {
                         flb_sds_destroy(write_op);
@@ -388,7 +431,7 @@ static int process_ndpack(struct flb_in_elasticsearch *ctx, flb_sds_t tag, char 
                     }
 
                     ret = flb_log_event_encoder_set_timestamp(
-                            &ctx->log_encoder,
+                            ctx->log_encoder,
                             &tm);
 
                     if (ret != FLB_EVENT_ENCODER_SUCCESS) {
@@ -401,7 +444,7 @@ static int process_ndpack(struct flb_in_elasticsearch *ctx, flb_sds_t tag, char 
 
                     if (ret == FLB_EVENT_ENCODER_SUCCESS) {
                         ret = flb_log_event_encoder_append_body_values(
-                                &ctx->log_encoder,
+                                ctx->log_encoder,
                                 FLB_LOG_EVENT_CSTRING_VALUE((char *) ctx->meta_key),
                                 FLB_LOG_EVENT_MSGPACK_OBJECT_VALUE(&result.data));
                     }
@@ -426,7 +469,7 @@ static int process_ndpack(struct flb_in_elasticsearch *ctx, flb_sds_t tag, char 
                         map_copy_entry = &result.data.via.map.ptr[map_copy_index];
 
                         ret = flb_log_event_encoder_append_body_values(
-                                &ctx->log_encoder,
+                                ctx->log_encoder,
                                 FLB_LOG_EVENT_MSGPACK_OBJECT_VALUE(&map_copy_entry->key),
                                 FLB_LOG_EVENT_MSGPACK_OBJECT_VALUE(&map_copy_entry->val));
                     }
@@ -438,7 +481,7 @@ static int process_ndpack(struct flb_in_elasticsearch *ctx, flb_sds_t tag, char 
                         break;
                     }
 
-                    ret = flb_log_event_encoder_commit_record(&ctx->log_encoder);
+                    ret = flb_log_event_encoder_commit_record(ctx->log_encoder);
 
                     if (ret != FLB_EVENT_ENCODER_SUCCESS) {
                         flb_plg_error(ctx->ins, "event encoder error : %d", ret);
@@ -458,8 +501,8 @@ static int process_ndpack(struct flb_in_elasticsearch *ctx, flb_sds_t tag, char 
                         flb_input_log_append(ctx->ins,
                                              tag_from_record,
                                              flb_sds_len(tag_from_record),
-                                             ctx->log_encoder.output_buffer,
-                                             ctx->log_encoder.output_length);
+                                             ctx->log_encoder->output_buffer,
+                                             ctx->log_encoder->output_length);
 
                         flb_sds_destroy(tag_from_record);
                     }
@@ -467,17 +510,17 @@ static int process_ndpack(struct flb_in_elasticsearch *ctx, flb_sds_t tag, char 
                         flb_input_log_append(ctx->ins,
                                              tag,
                                              flb_sds_len(tag),
-                                             ctx->log_encoder.output_buffer,
-                                             ctx->log_encoder.output_length);
+                                             ctx->log_encoder->output_buffer,
+                                             ctx->log_encoder->output_length);
                     }
                     else {
                         /* use default plugin Tag (it internal name, e.g: http.0 */
                         flb_input_log_append(ctx->ins, NULL, 0,
-                                             ctx->log_encoder.output_buffer,
-                                             ctx->log_encoder.output_length);
+                                             ctx->log_encoder->output_buffer,
+                                             ctx->log_encoder->output_length);
                     }
 
-                    flb_log_event_encoder_reset(&ctx->log_encoder);
+                    flb_log_event_encoder_reset(ctx->log_encoder);
                 }
                 if (op_ret) {
                     if (flb_sds_cmp(write_op, "index", op_str_size) == 0) {
@@ -500,7 +543,6 @@ static int process_ndpack(struct flb_in_elasticsearch *ctx, flb_sds_t tag, char 
 
         proceed:
             idx++;
-            cursor++;
         }
         else {
             flb_plg_error(ctx->ins, "skip record from invalid type: %i",
@@ -579,6 +621,10 @@ static int process_payload(struct flb_in_elasticsearch *ctx, struct in_elasticse
     int gzip_compressed = FLB_FALSE;
     void *gz_data = NULL;
     size_t gz_size = -1;
+    char *out_chunked = NULL;
+    size_t out_chunked_size = 0;
+    char *payload_buf;
+    size_t payload_size;
 
     header = &session->parser.headers[MK_HEADER_CONTENT_TYPE];
     if (header->key.data == NULL) {
@@ -601,7 +647,7 @@ static int process_payload(struct flb_in_elasticsearch *ctx, struct in_elasticse
         return -1;
     }
 
-    if (request->data.len <= 0) {
+    if (request->data.len <= 0 && !mk_http_parser_is_content_chunked(&session->parser)) {
         send_response(conn, 400, "error: no payload found\n");
         return -1;
     }
@@ -622,8 +668,32 @@ static int process_payload(struct flb_in_elasticsearch *ctx, struct in_elasticse
     }
 
     if (type == HTTP_CONTENT_NDJSON || type == HTTP_CONTENT_JSON) {
+        /* Check if the data is chunked */
+        payload_buf = NULL;
+        payload_size = 0;
+
+        if (mk_http_parser_is_content_chunked(&session->parser)) {
+            ret = mk_http_parser_chunked_decode(&session->parser,
+                                                conn->buf_data,
+                                                conn->buf_len,
+                                                &out_chunked,
+                                                &out_chunked_size);
+
+            if (ret == -1) {
+                send_response(conn, 400, "error: invalid chunked data\n");
+                return -1;
+            }
+
+            payload_buf = out_chunked;
+            payload_size = out_chunked_size;
+        }
+        else {
+            payload_buf = request->data.data;
+            payload_size = request->data.len;
+        }
+
         if (gzip_compressed == FLB_TRUE) {
-            ret = flb_gzip_uncompress((void *) request->data.data, request->data.len,
+            ret = flb_gzip_uncompress((void *) payload_buf, payload_size,
                                       &gz_data, &gz_size);
             if (ret == -1) {
                 flb_error("[elasticsearch_bulk_prot] gzip uncompress is failed");
@@ -633,8 +703,13 @@ static int process_payload(struct flb_in_elasticsearch *ctx, struct in_elasticse
             flb_free(gz_data);
         }
         else {
-            parse_payload_ndjson(ctx, tag, request->data.data, request->data.len, bulk_statuses);
+            parse_payload_ndjson(ctx, tag, payload_buf, payload_size, bulk_statuses);
         }
+    }
+
+    /* release chunked data if has been set */
+    if (out_chunked) {
+        mk_mem_free(out_chunked);
     }
 
     return 0;
@@ -708,6 +783,7 @@ int in_elasticsearch_bulk_prot_handle(struct flb_in_elasticsearch *ctx,
     if (ctx->ins->tag && !ctx->ins->tag_default) {
         tag = flb_sds_create(ctx->ins->tag);
         if (tag == NULL) {
+            mk_mem_free(uri);
             return -1;
         }
     }
@@ -785,7 +861,7 @@ int in_elasticsearch_bulk_prot_handle(struct flb_in_elasticsearch *ctx,
             send_dummy_sniffer_response(conn, 200, ctx);
         }
         else if (strlen(uri) == 1 && strncmp(uri, "/", 1) == 0) {
-            send_json_message_response(conn, 200, ES_VERSION_RESPONSE);
+            send_version_message_response(ctx, conn, 200);
         }
         else {
             send_json_message_response(conn, 200, "{}");
@@ -813,11 +889,12 @@ int in_elasticsearch_bulk_prot_handle(struct flb_in_elasticsearch *ctx,
                 mk_mem_free(uri);
                 return -1;
             }
-        } else {
+        }
+        else {
             flb_sds_destroy(tag);
             mk_mem_free(uri);
 
-            send_response(conn, 400, "error: invaild HTTP endpoint\n");
+            send_response(conn, 400, "error: invalid HTTP endpoint\n");
 
             return -1;
         }
@@ -851,13 +928,13 @@ int in_elasticsearch_bulk_prot_handle(struct flb_in_elasticsearch *ctx,
     }
     error_str = strstr(bulk_statuses, "\"status\":40");
     if (error_str){
-        flb_sds_cat(bulk_response, "{\"errors\":true,\"items\":[", 24);
+        flb_sds_cat_safe(&bulk_response, "{\"errors\":true,\"items\":[", 24);
     }
     else {
-        flb_sds_cat(bulk_response, "{\"errors\":false,\"items\":[", 25);
+        flb_sds_cat_safe(&bulk_response, "{\"errors\":false,\"items\":[", 25);
     }
-    flb_sds_cat(bulk_response, bulk_statuses, flb_sds_len(bulk_statuses));
-    flb_sds_cat(bulk_response, "]}", 2);
+    flb_sds_cat_safe(&bulk_response, bulk_statuses, flb_sds_len(bulk_statuses));
+    flb_sds_cat_safe(&bulk_response, "]}", 2);
     send_response(conn, 200, bulk_response);
 
     mk_mem_free(uri);
@@ -877,4 +954,258 @@ int in_elasticsearch_bulk_prot_handle_error(struct flb_in_elasticsearch *ctx,
 {
     send_response(conn, 400, "error: invalid request\n");
     return -1;
+}
+
+
+
+
+/* New gen HTTP server */
+static int send_response_ng(struct flb_http_response *response,
+                            int http_status,
+                            char *content_type,
+                            char *message)
+{
+    flb_http_response_set_status(response, http_status);
+
+    if (http_status == 201) {
+        flb_http_response_set_message(response, "Created");
+    }
+    else if (http_status == 200) {
+        flb_http_response_set_message(response, "OK");
+    }
+    else if (http_status == 204) {
+        flb_http_response_set_message(response, "No Content");
+    }
+    else if (http_status == 400) {
+        flb_http_response_set_message(response, "Bad Request");
+    }
+
+    if (content_type != NULL) {
+        flb_http_response_set_header(response,
+                                     "content-type", 0,
+                                     content_type, 0);
+    }
+
+    if (message != NULL) {
+        flb_http_response_set_body(response,
+                                   (unsigned char *) message,
+                                   strlen(message));
+    }
+
+    flb_http_response_commit(response);
+
+    return 0;
+}
+
+static int send_json_response_ng(struct flb_http_response *response,
+                                 int http_status,
+                                 char *message)
+{
+    return send_response_ng(response, http_status, "application/json", message);
+}
+
+static int send_version_message_response_ng(struct flb_http_response *response,
+                                            struct flb_in_elasticsearch *ctx,
+                                            int http_status)
+{
+    flb_sds_t message;
+
+    if (http_status != 200) {
+        return 0;
+    }
+
+    message = flb_sds_create_size(384);
+
+    if (message == NULL) {
+        return -1;
+    }
+
+    flb_sds_printf(&message,
+                   ES_VERSION_RESPONSE_TEMPLATE,
+                   ctx->es_version);
+
+    send_json_response_ng(response, http_status, message);
+
+    cfl_sds_destroy(message);
+
+    return 0;
+}
+
+static int send_dummy_sniffer_response_ng(struct flb_http_response *response,
+                                          struct flb_in_elasticsearch *ctx,
+                                          int http_status)
+{
+    flb_sds_t hostname;
+    flb_sds_t resp;
+
+    if (http_status != 200) {
+        return 0;
+    }
+
+    if (ctx->hostname != NULL) {
+        hostname = ctx->hostname;
+    }
+    else {
+        hostname = "localhost";
+    }
+
+    resp = flb_sds_create_size(384);
+    if (!resp) {
+        return -1;
+    }
+
+    flb_sds_printf(&resp,
+                   ES_NODES_TEMPLATE,
+                   ctx->cluster_name, ctx->node_name,
+                   hostname, ctx->tcp_port, ctx->buffer_max_size);
+
+    send_json_response_ng(response, http_status, resp);
+
+    flb_sds_destroy(resp);
+
+    return 0;
+}
+
+static int process_payload_ng(struct flb_http_request *request,
+                              struct flb_http_response *response,
+                              struct flb_in_elasticsearch *context,
+                              flb_sds_t tag,
+                              flb_sds_t bulk_statuses)
+{
+    if (request->content_type == NULL) {
+        send_response_ng(response, 400, NULL, "error: header 'Content-Type' is not set\n");
+
+        return -1;
+    }
+
+    if (strncasecmp(request->content_type, "application/x-ndjson", 20) != 0 &&
+        strncasecmp(request->content_type, "application/json", 16) != 0) {
+        send_response_ng(response, 400, NULL, "error: invalid 'Content-Type'\n");
+
+        return -1;
+    }
+
+    if (request->body == NULL || cfl_sds_len(request->body) == 0) {
+        send_response_ng(response, 400, NULL, "error: no payload found\n");
+        return -1;
+    }
+
+    parse_payload_ndjson(context, tag, request->body, cfl_sds_len(request->body), bulk_statuses);
+
+    return 0;
+}
+
+int in_elasticsearch_bulk_prot_handle_ng(struct flb_http_request *request,
+                                         struct flb_http_response *response)
+{
+    flb_sds_t                    bulk_statuses;
+    flb_sds_t                    bulk_response;
+    const char                  *error_str;
+    struct flb_in_elasticsearch *context;
+    flb_sds_t                    tag;
+    size_t                       len;
+
+    bulk_statuses = NULL;
+    bulk_response = NULL;
+
+    context = (struct flb_in_elasticsearch *) response->stream->user_data;
+
+    if (request->path[0] != '/') {
+        send_response_ng(response, 400, NULL, "error: invalid request\n");
+        return -1;
+    }
+
+    /* HTTP/1.1 needs Host header */
+    if (request->protocol_version == HTTP_PROTOCOL_VERSION_11 &&
+        request->host == NULL) {
+
+        return -1;
+    }
+
+    if (request->method == HTTP_METHOD_HEAD) {
+        send_response_ng(response, 200, NULL, NULL);
+
+        return -1;
+    }
+    else if (request->method == HTTP_METHOD_PUT) {
+        send_json_response_ng(response, 200, "{}");
+
+        return -1;
+    }
+    else if (request->method == HTTP_METHOD_GET) {
+        if (strncmp(request->path, "/_nodes/http", 12) == 0) {
+            send_dummy_sniffer_response_ng(response, context, 200);
+        }
+        else if (strcmp(request->path, "/") == 0) {
+            send_version_message_response_ng(response, context, 200);
+        }
+        else {
+            send_json_response_ng(response, 200, "{}");
+        }
+
+        return 0;
+    }
+    else if (request->method == HTTP_METHOD_POST) {
+        if (strcmp(request->path, "/_bulk") == 0) {
+            bulk_statuses = flb_sds_create_size(context->buffer_max_size);
+
+            if (bulk_statuses == NULL) {
+                return -1;
+            }
+
+            bulk_response = flb_sds_create_size(context->buffer_max_size);
+
+            if (bulk_response == NULL) {
+                flb_sds_destroy(bulk_statuses);
+                return -1;
+            }
+
+            tag = flb_sds_create(context->ins->tag);
+
+            if (tag == NULL) {
+                flb_sds_destroy(bulk_statuses);
+                flb_sds_destroy(bulk_response);
+                return -1;
+            }
+
+            process_payload_ng(request, response, context, tag, bulk_statuses);
+
+            flb_sds_destroy(tag);
+
+            len = flb_sds_len(bulk_statuses);
+
+            if (flb_sds_alloc(bulk_response) < len + 27) {
+                bulk_response = flb_sds_increase(bulk_response, len + 27 - flb_sds_alloc(bulk_response));
+            }
+
+            error_str = strstr(bulk_statuses, "\"status\":40");
+
+            if (error_str){
+                flb_sds_cat(bulk_response, "{\"errors\":true,\"items\":[", 24);
+            }
+            else {
+                flb_sds_cat(bulk_response, "{\"errors\":false,\"items\":[", 25);
+            }
+
+            flb_sds_cat(bulk_response, bulk_statuses, flb_sds_len(bulk_statuses));
+            flb_sds_cat(bulk_response, "]}", 2);
+
+            send_json_response_ng(response, 200, bulk_response);
+
+            flb_sds_destroy(bulk_statuses);
+            flb_sds_destroy(bulk_response);
+
+        } else {
+            send_response_ng(response, 400, NULL, "error: invalid HTTP endpoint\n");
+
+            return -1;
+        }
+    }
+    else {
+        send_response_ng(response, 400, NULL, "error: invalid HTTP method\n");
+
+        return -1;
+    }
+
+    return 0;
 }

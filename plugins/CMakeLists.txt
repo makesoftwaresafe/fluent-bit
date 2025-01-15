@@ -193,6 +193,8 @@ endmacro()
 # Custom Plugins
 REGISTER_CUSTOM_PLUGIN("custom_calyptia")
 
+REGISTER_IN_PLUGIN("in_blob")
+
 # These plugins works only on Linux
 if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
   REGISTER_IN_PLUGIN("in_cpu")
@@ -205,10 +207,16 @@ if(${CMAKE_SYSTEM_NAME} MATCHES "Linux")
   REGISTER_IN_PLUGIN("in_netif")
   REGISTER_IN_PLUGIN("in_docker")
   REGISTER_IN_PLUGIN("in_docker_events")
-  REGISTER_IN_PLUGIN("in_node_exporter_metrics")
   REGISTER_IN_PLUGIN("in_podman_metrics")
+  REGISTER_IN_PLUGIN("in_process_exporter_metrics")
+  REGISTER_IN_PLUGIN("in_ebpf")
 endif()
 
+if(${CMAKE_SYSTEM_NAME} MATCHES "Linux" OR ${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+  REGISTER_IN_PLUGIN("in_node_exporter_metrics")
+endif()
+
+REGISTER_IN_PLUGIN("in_kubernetes_events")
 REGISTER_IN_PLUGIN("in_kafka")
 REGISTER_IN_PLUGIN("in_fluentbit_metrics")
 REGISTER_IN_PLUGIN("in_prometheus_scrape")
@@ -223,6 +231,8 @@ REGISTER_IN_PLUGIN("in_statsd")
 REGISTER_IN_PLUGIN("in_opentelemetry")
 REGISTER_IN_PLUGIN("in_elasticsearch")
 REGISTER_IN_PLUGIN("in_calyptia_fleet")
+REGISTER_IN_PLUGIN("in_splunk")
+REGISTER_IN_PLUGIN("in_prometheus_remote_write")
 
 # Test the event loop messaging when used in threaded mode
 REGISTER_IN_PLUGIN("in_event_test")
@@ -275,13 +285,17 @@ REGISTER_IN_PLUGIN("in_random")
 
 # PROCESSORS
 # ==========
+REGISTER_PROCESSOR_PLUGIN("processor_content_modifier")
 REGISTER_PROCESSOR_PLUGIN("processor_labels")
-REGISTER_PROCESSOR_PLUGIN("processor_attributes")
+REGISTER_PROCESSOR_PLUGIN("processor_metrics_selector")
+REGISTER_PROCESSOR_PLUGIN("processor_sql")
+REGISTER_PROCESSOR_PLUGIN("processor_opentelemetry_envelope")
 
 # OUTPUTS
 # =======
 REGISTER_OUT_PLUGIN("out_azure")
 REGISTER_OUT_PLUGIN("out_azure_blob")
+REGISTER_OUT_PLUGIN("out_azure_logs_ingestion")
 REGISTER_OUT_PLUGIN("out_azure_kusto")
 REGISTER_OUT_PLUGIN("out_bigquery")
 REGISTER_OUT_PLUGIN("out_calyptia")
@@ -301,6 +315,7 @@ REGISTER_OUT_PLUGIN("out_nats")
 REGISTER_OUT_PLUGIN("out_nrlogs")
 REGISTER_OUT_PLUGIN("out_null")
 REGISTER_OUT_PLUGIN("out_opensearch")
+REGISTER_OUT_PLUGIN("out_oracle_log_analytics")
 
 if (NOT CMAKE_SYSTEM_NAME MATCHES "Windows")
   REGISTER_OUT_PLUGIN("out_plot")
@@ -329,6 +344,7 @@ REGISTER_OUT_PLUGIN("out_prometheus_exporter")
 REGISTER_OUT_PLUGIN("out_prometheus_remote_write")
 REGISTER_OUT_PLUGIN("out_s3")
 REGISTER_OUT_PLUGIN("out_vivo_exporter")
+REGISTER_OUT_PLUGIN("out_chronicle")
 
 # FILTERS
 # =======
@@ -337,6 +353,7 @@ REGISTER_FILTER_PLUGIN("filter_aws")
 REGISTER_FILTER_PLUGIN("filter_checklist")
 REGISTER_FILTER_PLUGIN("filter_ecs")
 REGISTER_FILTER_PLUGIN("filter_record_modifier")
+REGISTER_FILTER_PLUGIN("filter_sysinfo")
 REGISTER_FILTER_PLUGIN("filter_throttle")
 REGISTER_FILTER_PLUGIN("filter_throttle_size")
 REGISTER_FILTER_PLUGIN("filter_tensorflow")

@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -64,6 +64,7 @@ struct flb_filter_plugin {
     struct flb_config_map *config_map;
 
     /* Callbacks */
+    int (*cb_pre_run) (struct flb_filter_instance *, struct flb_config *, void *);
     int (*cb_init) (struct flb_filter_instance *, struct flb_config *, void *);
     int (*cb_filter) (const void *, size_t,
                       const char *, int,
@@ -72,6 +73,9 @@ struct flb_filter_plugin {
                       struct flb_input_instance *,
                       void *, struct flb_config *);
     int (*cb_exit) (void *, struct flb_config *);
+
+    /* Notification: this callback will be invoked anytime a notification is received*/
+    int (*cb_notification) (struct flb_filter_instance *, struct flb_config *, void *);
 
     struct mk_list _head;  /* Link to parent list (config->filters) */
 };
@@ -87,6 +91,7 @@ struct flb_filter_instance {
 #ifdef FLB_HAVE_REGEX
     struct flb_regex *match_regex; /* match rule (regex) based on Tags */
 #endif
+    void *parent_processor;        /* Parent processor         */
     void *context;                 /* Instance local context   */
     void *data;
     struct flb_filter_plugin *p;   /* original plugin          */
@@ -104,10 +109,12 @@ struct flb_filter_instance {
     struct cmt_counter *cmt_bytes;        /* m: filter_bytes_total        */
     struct cmt_counter *cmt_add_records;  /* m: filter_add_records_total  */
     struct cmt_counter *cmt_drop_records; /* m: filter_drop_records_total */
+    struct cmt_counter *cmt_drop_bytes;   /* m: filter_drop_bytes_total   */
 
 #ifdef FLB_HAVE_METRICS
     struct flb_metrics *metrics;   /* metrics                  */
 #endif
+    flb_pipefd_t notification_channel;
 
     /* Keep a reference to the original context this instance belongs to */
     struct flb_config *config;
@@ -132,6 +139,7 @@ void flb_filter_instance_exit(struct flb_filter_instance *ins,
 void flb_filter_exit(struct flb_config *config);
 void flb_filter_do(struct flb_input_chunk *ic,
                    const void *data, size_t bytes,
+                   void **out_data, size_t *out_bytes,
                    const char *tag, int tag_len,
                    struct flb_config *config);
 const char *flb_filter_name(struct flb_filter_instance *ins);

@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@
 
 #include <fluent-bit/flb_info.h>
 #include <fluent-bit/flb_input.h>
+#include <fluent-bit/flb_plugin.h>
+#include <fluent-bit/flb_processor.h>
 #include <fluent-bit/flb_filter_plugin.h>
 #include <fluent-bit/flb_metrics.h>
 #include <fluent-bit/flb_storage.h>
@@ -95,6 +97,8 @@ static int emitter_create(struct flb_rewrite_tag *ctx)
     if (ret == -1) {
         flb_plg_error(ctx->ins, "cannot initialize storage for stream '%s'",
                       ctx->emitter_name);
+        flb_input_instance_exit(ins, ctx->config);
+        flb_input_instance_destroy(ins);
         return -1;
     }
     ctx->ins_emitter = ins;
@@ -133,6 +137,11 @@ static int process_config(struct flb_rewrite_tag *ctx)
 
         /* key */
         entry = flb_slist_entry_get(val->val.list, 0);
+        if (entry == NULL) {
+            flb_plg_error(ctx->ins, "failed to get entry");
+            flb_free(rule);
+            return -1;
+        }
         rule->ra_key = flb_ra_create(entry->str, FLB_FALSE);
         if (!rule->ra_key) {
             flb_plg_error(ctx->ins, "invalid record accessor key ? '%s'",
@@ -307,6 +316,38 @@ static int cb_rewrite_tag_init(struct flb_filter_instance *ins,
     return 0;
 }
 
+static int ingest_inline(struct flb_rewrite_tag *ctx,
+                         flb_sds_t out_tag,
+                         const void *buf, size_t buf_size)
+{
+    struct flb_input_instance *input_instance;
+    struct flb_processor_unit *processor_unit;
+    struct flb_processor      *processor;
+    int                        result;
+
+    if (ctx->ins->parent_processor != NULL) {
+        processor_unit = (struct flb_processor_unit *) \
+                            ctx->ins->parent_processor;
+        processor = (struct flb_processor *) processor_unit->parent;
+        input_instance = (struct flb_input_instance *) processor->data;
+
+        if (processor->source_plugin_type == FLB_PLUGIN_INPUT) {
+            result = flb_input_log_append_skip_processor_stages(
+                        input_instance,
+                        processor_unit->stage + 1,
+                        out_tag, flb_sds_len(out_tag),
+                        buf, buf_size);
+
+            if (result == 0) {
+                return FLB_TRUE;
+            }
+        }
+    }
+
+    return FLB_FALSE;
+}
+
+
 /*
  * On given record, check if a rule applies or not to the map, if so, compose
  * the new tag, emit the record and return FLB_TRUE, otherwise just return
@@ -314,7 +355,8 @@ static int cb_rewrite_tag_init(struct flb_filter_instance *ins,
  */
 static int process_record(const char *tag, int tag_len, msgpack_object map,
                           const void *buf, size_t buf_size, int *keep,
-                          struct flb_rewrite_tag *ctx, int *matched)
+                          struct flb_rewrite_tag *ctx, int *matched,
+                          struct flb_input_instance *i_ins)
 {
     int ret;
     flb_sds_t out_tag;
@@ -358,9 +400,16 @@ static int process_record(const char *tag, int tag_len, msgpack_object map,
         return FLB_FALSE;
     }
 
-    /* Emit record with new tag */
-    ret = in_emitter_add_record(out_tag, flb_sds_len(out_tag), buf, buf_size,
-                                ctx->ins_emitter);
+    ret = ingest_inline(ctx, out_tag, buf, buf_size);
+
+    if (!ret) {
+        /* Emit record with new tag */
+        ret = in_emitter_add_record(out_tag, flb_sds_len(out_tag), buf, buf_size,
+                                    ctx->ins_emitter, i_ins);
+    }
+    else {
+        ret = 0;
+    }
 
     /* Release the tag */
     flb_sds_destroy(out_tag);
@@ -441,7 +490,7 @@ static int cb_rewrite_tag_filter(const void *data, size_t bytes,
          * If a record was emitted, the variable 'keep' will define if the record must
          * be preserved or not.
          */
-        is_emitted = process_record(tag, tag_len, map, (char *) data + pre, off - pre, &keep, ctx, &is_matched);
+        is_emitted = process_record(tag, tag_len, map, (char *) data + pre, off - pre, &keep, ctx, &is_matched, i_ins);
         if (is_emitted == FLB_TRUE) {
             /* A record with the new tag was emitted */
             emitted_num++;

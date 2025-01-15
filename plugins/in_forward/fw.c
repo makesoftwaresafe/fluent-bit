@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -18,10 +18,12 @@
  */
 
 #include <fluent-bit/flb_info.h>
+#include <fluent-bit/flb_kv.h>
 #include <fluent-bit/flb_input.h>
 #include <fluent-bit/flb_engine.h>
 #include <fluent-bit/flb_downstream.h>
 #include <fluent-bit/flb_input_plugin.h>
+#include <fluent-bit/flb_utils.h>
 #include <fluent-bit/flb_network.h>
 #include <msgpack.h>
 
@@ -142,12 +144,104 @@ static int in_fw_collect(struct flb_input_instance *ins,
         return -1;
     }
 
+    if(ctx->is_paused) {
+        flb_downstream_conn_release(connection);
+        flb_plg_trace(ins, "TCP connection will be closed FD=%i", connection->fd);
+        return -1;
+    }
+
     flb_plg_trace(ins, "new TCP connection arrived FD=%i", connection->fd);
 
     conn = fw_conn_add(connection, ctx);
 
     if (!conn) {
         return -1;
+    }
+
+    return 0;
+}
+
+static void delete_users(struct flb_in_fw_config *ctx)
+{
+    struct mk_list *tmp;
+    struct mk_list *head;
+    struct flb_in_fw_user *user;
+
+    mk_list_foreach_safe(head, tmp, &ctx->users) {
+        user = mk_list_entry(head, struct flb_in_fw_user, _head);
+        flb_sds_destroy(user->name);
+        flb_sds_destroy(user->password);
+        mk_list_del(&user->_head);
+        flb_free(user);
+    }
+}
+
+static int setup_users(struct flb_in_fw_config *ctx,
+                       struct flb_input_instance *ins)
+{
+    flb_sds_t tmp;
+    struct mk_list *head;
+    struct mk_list *split;
+    struct flb_split_entry *sentry;
+    struct flb_kv *kv;
+    struct flb_in_fw_user *user;
+
+    /* Iterate all input properties */
+    mk_list_foreach(head, &ins->properties) {
+        kv = mk_list_entry(head, struct flb_kv, _head);
+
+        /* Create a new user */
+        user = flb_malloc(sizeof(struct flb_in_fw_user));
+        if (!user) {
+            flb_errno();
+            return -1;
+        }
+
+        /* Get the type */
+        if (strcasecmp(kv->key, "security.users") != 0) {
+            /* Other property. Skip */
+            flb_free(user);
+            continue;
+        }
+
+        /* As a value we expect a pair of a username and a passowrd */
+        split = flb_utils_split(kv->val, ' ', 1);
+        if (mk_list_size(split) != 2) {
+            flb_plg_error(ctx->ins,
+                          "invalid value, expected username and password");
+            delete_users(ctx);
+            flb_free(user);
+            flb_utils_split_free(split);
+            return -1;
+        }
+
+        /* Get first value (user's name) */
+        sentry = mk_list_entry_first(split, struct flb_split_entry, _head);
+        tmp = flb_sds_create_len(sentry->value, sentry->len + 1);
+        if (tmp == NULL) {
+            delete_users(ctx);
+            flb_free(user);
+            flb_utils_split_free(split);
+            return -1;
+        }
+        user->name = tmp;
+
+        /* Get remaining content (password) */
+        sentry = mk_list_entry_last(split, struct flb_split_entry, _head);
+        tmp = flb_sds_create_len(sentry->value, sentry->len);
+        if (tmp == NULL) {
+            delete_users(ctx);
+            flb_free(user);
+            flb_utils_split_free(split);
+            return -1;
+        }
+        user->password = tmp;
+
+        /* Release split */
+        flb_utils_split_free(split);
+
+        /* Link to parent list */
+        mk_list_add(&user->_head, &ctx->users);
     }
 
     return 0;
@@ -172,9 +266,13 @@ static int in_fw_init(struct flb_input_instance *ins,
     ctx->coll_fd = -1;
     ctx->ins = ins;
     mk_list_init(&ctx->connections);
+    mk_list_init(&ctx->users);
 
     /* Set the context */
     flb_input_set_context(ins, ctx);
+
+    /* Set plugin ingestion to active */
+    ctx->is_paused = FLB_FALSE;
 
     /* Unix Socket mode */
     if (ctx->unix_path) {
@@ -229,6 +327,13 @@ static int in_fw_init(struct flb_input_instance *ins,
         }
     }
 
+    /* Load users */
+    ret = setup_users(ctx, ins);
+    if (ret == -1) {
+        flb_free(ctx);
+        return -1;
+    }
+
     flb_input_downstream_set(ctx->downstream, ctx->ins);
 
     flb_net_socket_nonblocking(ctx->downstream->server_fd);
@@ -246,12 +351,28 @@ static int in_fw_init(struct flb_input_instance *ins,
 
     ctx->coll_fd = ret;
 
+    pthread_mutex_init(&ctx->conn_mutex, NULL);
+
     return 0;
 }
 
 static void in_fw_pause(void *data, struct flb_config *config)
 {
     struct flb_in_fw_config *ctx = data;
+    if (config->is_running == FLB_TRUE) {
+        /*
+         * This is the case when we are not in a shutdown phase, but
+         * backpressure built up, and the plugin needs to
+         * pause the ingestion. The plugin should close all the connections
+         * and wait for the ingestion to resume.
+         */
+        flb_input_collector_pause(ctx->coll_fd, ctx->ins);
+        if (pthread_mutex_lock(&ctx->conn_mutex)) {
+            fw_conn_del_all(ctx);
+            ctx->is_paused = FLB_TRUE;
+        }
+        pthread_mutex_unlock(&ctx->conn_mutex);
+    }
 
     /*
      * If the plugin is paused AND the ingestion not longer active,
@@ -266,6 +387,18 @@ static void in_fw_pause(void *data, struct flb_config *config)
     }
 }
 
+static void in_fw_resume(void *data, struct flb_config *config) {
+    struct flb_in_fw_config *ctx = data;
+    if (config->is_running == FLB_TRUE) {
+        flb_input_collector_resume(ctx->coll_fd, ctx->ins);
+        if (pthread_mutex_lock(&ctx->conn_mutex)) {
+            ctx->is_paused = FLB_FALSE;
+        }
+        pthread_mutex_unlock(&ctx->conn_mutex);
+    }
+}
+
+
 static int in_fw_exit(void *data, struct flb_config *config)
 {
     (void) *config;
@@ -275,6 +408,7 @@ static int in_fw_exit(void *data, struct flb_config *config)
         return 0;
     }
 
+    delete_users(ctx);
     fw_conn_del_all(ctx);
     fw_config_destroy(ctx);
     return 0;
@@ -286,6 +420,21 @@ static struct flb_config_map config_map[] = {
     FLB_CONFIG_MAP_STR, "tag_prefix", NULL,
     0, FLB_TRUE, offsetof(struct flb_in_fw_config, tag_prefix),
     "Prefix incoming tag with the defined value."
+   },
+   {
+    FLB_CONFIG_MAP_STR, "shared_key", NULL,
+    0, FLB_TRUE, offsetof(struct flb_in_fw_config, shared_key),
+    "Shared key for authentication"
+   },
+   {
+    FLB_CONFIG_MAP_STR, "self_hostname", NULL,
+    0, FLB_FALSE, 0,
+    "Hostname"
+   },
+   {
+    FLB_CONFIG_MAP_STR, "security.users", NULL,
+    FLB_CONFIG_MAP_MULT, FLB_FALSE, 0,
+    "Specify username and password pairs."
    },
    {
     FLB_CONFIG_MAP_STR, "unix_path", NULL,
@@ -307,6 +456,11 @@ static struct flb_config_map config_map[] = {
     0, FLB_TRUE, offsetof(struct flb_in_fw_config, buffer_max_size),
     "The maximum buffer memory size used to receive a Forward message."
    },
+   {
+    FLB_CONFIG_MAP_BOOL, "empty_shared_key", "false",
+    0, FLB_TRUE, offsetof(struct flb_in_fw_config, empty_shared_key),
+    "Set an empty shared key for authentication"
+   },
    {0}
 };
 
@@ -319,6 +473,7 @@ struct flb_input_plugin in_forward_plugin = {
     .cb_collect   = in_fw_collect,
     .cb_flush_buf = NULL,
     .cb_pause     = in_fw_pause,
+    .cb_resume    = in_fw_resume,
     .cb_exit      = in_fw_exit,
     .config_map   = config_map,
     .flags        = FLB_INPUT_NET_SERVER | FLB_IO_OPT_TLS

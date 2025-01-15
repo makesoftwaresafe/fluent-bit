@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2023 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -59,15 +59,12 @@ struct flb_in_elasticsearch *in_elasticsearch_config_create(struct flb_input_ins
      * moment so we want to make sure that it stays that way!
      */
 
-    ret = flb_log_event_encoder_init(&ctx->log_encoder,
-                                     FLB_LOG_EVENT_FORMAT_DEFAULT);
-
-    if (ret != FLB_EVENT_ENCODER_SUCCESS) {
-        flb_plg_error(ctx->ins, "error initializing event encoder : %d", ret);
-
+    ctx->log_encoder = flb_log_event_encoder_create(FLB_LOG_EVENT_FORMAT_DEFAULT);
+    if (ctx->log_encoder == NULL) {
+        flb_plg_error(ctx->ins, "event encoder initialization error");
         in_elasticsearch_config_destroy(ctx);
 
-        return ctx = NULL;
+        return NULL;
     }
 
 
@@ -76,7 +73,7 @@ struct flb_in_elasticsearch *in_elasticsearch_config_create(struct flb_input_ins
 
 int in_elasticsearch_config_destroy(struct flb_in_elasticsearch *ctx)
 {
-    flb_log_event_encoder_destroy(&ctx->log_encoder);
+    flb_log_event_encoder_destroy(ctx->log_encoder);
 
     /* release all connections */
     in_elasticsearch_bulk_conn_release_all(ctx);
@@ -90,6 +87,10 @@ int in_elasticsearch_config_destroy(struct flb_in_elasticsearch *ctx)
 
     if (ctx->downstream != NULL) {
         flb_downstream_destroy(ctx->downstream);
+    }
+
+    if (ctx->enable_http2) {
+        flb_http_server_destroy(&ctx->http_server);
     }
 
     if (ctx->server) {

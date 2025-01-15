@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -28,6 +28,8 @@
 #include <fluent-bit/flb_slist.h>
 #include <fluent-bit/wasm/flb_wasm.h>
 
+#include <msgpack.h>
+
 #ifdef FLB_SYSTEM_WINDOWS
 #define STDIN_FILENO (_fileno( stdin ))
 #define STDOUT_FILENO (_fileno( stdout ))
@@ -39,6 +41,32 @@
 void flb_wasm_init(struct flb_config *config)
 {
     mk_list_init(&config->wasm_list);
+}
+
+struct flb_wasm_config *flb_wasm_config_init(struct flb_config *config)
+{
+    struct flb_wasm_config *wasm_config;
+
+    wasm_config = flb_calloc(1, sizeof(struct flb_wasm_config));
+    if (!wasm_config) {
+        flb_errno();
+        return NULL;
+    }
+
+    wasm_config->heap_size = FLB_WASM_DEFAULT_HEAP_SIZE;
+    wasm_config->stack_size = FLB_WASM_DEFAULT_STACK_SIZE;
+    wasm_config->stdinfd = -1;
+    wasm_config->stdoutfd = -1;
+    wasm_config->stderrfd = -1;
+
+    return wasm_config;
+}
+
+void flb_wasm_config_destroy(struct flb_wasm_config *wasm_config)
+{
+    if (wasm_config != NULL) {
+        flb_free(wasm_config);
+    }
 }
 
 static int flb_wasm_load_wasm_binary(const char *wasm_path, int8_t **out_buf, uint32_t *out_size)
@@ -79,10 +107,10 @@ error:
 
 struct flb_wasm *flb_wasm_instantiate(struct flb_config *config, const char *wasm_path,
                                       struct mk_list *accessible_dir_list,
-                                      int stdinfd, int stdoutfd, int stderrfd)
+                                      struct flb_wasm_config *wasm_config)
 {
     struct flb_wasm *fw;
-    uint32_t buf_size, stack_size = 8 * 1024, heap_size = 8 * 1024;
+    uint32_t buf_size;
     int8_t *buffer = NULL;
     char error_buf[128];
 #if WASM_ENABLE_LIBC_WASI != 0
@@ -98,6 +126,14 @@ struct flb_wasm *flb_wasm_instantiate(struct flb_config *config, const char *was
     wasm_exec_env_t exec_env = NULL;
 
     RuntimeInitArgs wasm_args;
+
+    if (wasm_config->heap_size < FLB_WASM_DEFAULT_HEAP_SIZE) {
+        wasm_config->heap_size = FLB_WASM_DEFAULT_HEAP_SIZE;
+    }
+
+    if (wasm_config->stack_size < FLB_WASM_DEFAULT_STACK_SIZE) {
+        wasm_config->stack_size = FLB_WASM_DEFAULT_STACK_SIZE;
+    }
 
     fw = flb_malloc(sizeof(struct flb_wasm));
     if (!fw) {
@@ -132,6 +168,8 @@ struct flb_wasm *flb_wasm_instantiate(struct flb_config *config, const char *was
 
     if (!wasm_runtime_full_init(&wasm_args)) {
         flb_error("Init runtime environment failed.");
+        flb_free(fw);
+
         return NULL;
     }
 
@@ -148,19 +186,21 @@ struct flb_wasm *flb_wasm_instantiate(struct flb_config *config, const char *was
 #if WASM_ENABLE_LIBC_WASI != 0
     wasm_runtime_set_wasi_args_ex(module, wasi_dir_list, accessible_dir_list_size, NULL, 0,
                                   NULL, 0, NULL, 0,
-                                  (stdinfd != -1) ? stdinfd : STDIN_FILENO,
-                                  (stdoutfd != -1) ? stdoutfd : STDOUT_FILENO,
-                                  (stderrfd != -1) ? stderrfd : STDERR_FILENO);
+                                  (wasm_config->stdinfd != -1) ? wasm_config->stdinfd : STDIN_FILENO,
+                                  (wasm_config->stdoutfd != -1) ? wasm_config->stdoutfd : STDOUT_FILENO,
+                                  (wasm_config->stderrfd != -1) ? wasm_config->stderrfd : STDERR_FILENO);
 #endif
 
-    module_inst = wasm_runtime_instantiate(module, stack_size, heap_size,
+    module_inst = wasm_runtime_instantiate(module,
+                                           wasm_config->stack_size,
+                                           wasm_config->heap_size,
                                            error_buf, sizeof(error_buf));
     if (!module_inst) {
         flb_error("Instantiate wasm module failed. error: %s", error_buf);
         goto error;
     }
 
-    exec_env = wasm_runtime_create_exec_env(module_inst, stack_size);
+    exec_env = wasm_runtime_create_exec_env(module_inst, wasm_config->stack_size);
     if (!exec_env) {
         flb_error("Create wasm execution environment failed.");
         goto error;
@@ -222,6 +262,87 @@ char *flb_wasm_call_function_format_json(struct flb_wasm *fw, const char *functi
     uint32_t func_args[6] = {fw->tag_buffer, tag_len,
                              t.tm.tv_sec, t.tm.tv_nsec,
                              fw->record_buffer, record_len};
+    size_t args_size = sizeof(func_args) / sizeof(uint32_t);
+
+    if (!(func = wasm_runtime_lookup_function(fw->module_inst, function_name, NULL))) {
+        flb_error("The %s wasm function is not found.", function_name);
+        return NULL;
+    }
+
+    if (!wasm_runtime_call_wasm(fw->exec_env, func, args_size, func_args)) {
+        exception = wasm_runtime_get_exception(fw->module_inst);
+        flb_error("Got exception running wasm code: %s", exception);
+        wasm_runtime_clear_exception(fw->module_inst);
+        return NULL;
+    }
+
+    // The return value is stored in the first element of the function argument array.
+    // It's a WASM pointer to null-terminated c char string.
+    // WAMR allows us to map WASM pointers to native pointers.
+    if (!wasm_runtime_validate_app_str_addr(fw->module_inst, func_args[0])) {
+        flb_warn("[wasm] returned value is invalid");
+        return NULL;
+    }
+    func_result = wasm_runtime_addr_app_to_native(fw->module_inst, func_args[0]);
+
+    if (func_result == NULL) {
+        return NULL;
+    }
+
+    return (char *)flb_strdup(func_result);
+}
+
+/*
+ * Msgpack Format but for WASM
+ * ------------------------------
+ * This mode is used if the char (C string) is only permitted as UTF-8
+ * environment such as Rust.
+ *
+ *  {
+ *    RECORD/MAP
+ *  }
+ */
+int flb_wasm_format_msgpack_mode(const char *tag, int tag_len,
+                                 struct flb_log_event *log_event,
+                                 void **out_buf, size_t *out_size)
+{
+    msgpack_packer   mp_pck;
+    msgpack_sbuffer  mp_sbuf;
+    msgpack_unpacked result;
+
+    /*
+     * if the case, we need to compose a new outgoing buffer instead
+     * of use the original one.
+     */
+    msgpack_sbuffer_init(&mp_sbuf);
+    msgpack_packer_init(&mp_pck, &mp_sbuf, msgpack_sbuffer_write);
+    msgpack_unpacked_init(&result);
+
+    msgpack_pack_object(&mp_pck, *log_event->body);
+
+    *out_buf  = mp_sbuf.data;
+    *out_size = mp_sbuf.size;
+    msgpack_unpacked_destroy(&result);
+
+    return 0;
+}
+
+char *flb_wasm_call_function_format_msgpack(struct flb_wasm *fw, const char *function_name,
+                                            const char* tag_data, size_t tag_len,
+                                            struct flb_time t,
+                                            const char *records, size_t records_len)
+{
+    const char *exception;
+    uint8_t *func_result;
+    wasm_function_inst_t func = NULL;
+    /* We should pass the length that is null terminator included into
+     * WASM runtime. This is why we add +1 for tag_len and record_len.
+     */
+    fw->tag_buffer = wasm_runtime_module_dup_data(fw->module_inst, tag_data, tag_len+1);
+    fw->record_buffer = wasm_runtime_module_dup_data(fw->module_inst, records, records_len);
+    uint32_t func_args[6] = {fw->tag_buffer, tag_len,
+                             t.tm.tv_sec, t.tm.tv_nsec,
+                             fw->record_buffer, records_len};
     size_t args_size = sizeof(func_args) / sizeof(uint32_t);
 
     if (!(func = wasm_runtime_lookup_function(fw->module_inst, function_name, NULL))) {

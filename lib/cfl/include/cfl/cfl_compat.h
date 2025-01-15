@@ -39,6 +39,7 @@
 #define timezone _timezone
 #define tzname _tzname
 #define strncasecmp _strnicmp
+#define strcasecmp _stricmp
 #define timegm _mkgmtime
 #endif /* _MSC_VER */
 

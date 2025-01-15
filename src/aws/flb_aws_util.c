@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -508,13 +508,13 @@ void flb_aws_print_xml_error(char *response, size_t response_len,
     flb_sds_t error;
     flb_sds_t message;
 
-    error = flb_xml_get_val(response, response_len, "<Code>");
+    error = flb_aws_xml_get_val(response, response_len, "<Code>", "</Code>");
     if (!error) {
         flb_plg_error(ins, "%s: Could not parse response", api);
         return;
     }
 
-    message = flb_xml_get_val(response, response_len, "<Message>");
+    message = flb_aws_xml_get_val(response, response_len, "<Message>", "</Message>");
     if (!message) {
         /* just print the error */
         flb_plg_error(ins, "%s API responded with error='%s'", api, error);
@@ -531,14 +531,15 @@ void flb_aws_print_xml_error(char *response, size_t response_len,
 /* Parses AWS XML API Error responses and returns the value of the <code> tag */
 flb_sds_t flb_aws_xml_error(char *response, size_t response_len)
 {
-    return flb_xml_get_val(response, response_len, "<code>");
+    return flb_aws_xml_get_val(response, response_len, "<Code>", "</Code>");
 }
 
 /*
  * Parses an XML document and returns the value of the given tag
  * Param `tag` should include angle brackets; ex "<code>"
+ * And param `end` should include end brackets: "</code>"
  */
-flb_sds_t flb_xml_get_val(char *response, size_t response_len, char *tag)
+flb_sds_t flb_aws_xml_get_val(char *response, size_t response_len, char *tag, char *tag_end)
 {
     flb_sds_t val = NULL;
     char *node = NULL;
@@ -557,7 +558,7 @@ flb_sds_t flb_xml_get_val(char *response, size_t response_len, char *tag)
     /* advance to end of tag */
     node += strlen(tag);
 
-    end = strchr(node, '<');
+    end = strstr(node, tag_end);
     if (!end) {
         flb_error("[aws] Could not find end of '%s' node in xml", tag);
         return NULL;
@@ -580,6 +581,8 @@ void flb_aws_print_error(char *response, size_t response_len,
 
     error = flb_json_get_val(response, response_len, "__type");
     if (!error) {
+        /* error can not be parsed, print raw response */
+        flb_plg_warn(ins, "%s: Raw response: %s", api, response);
         return;
     }
 
@@ -907,8 +910,8 @@ flb_sds_t flb_get_s3_key(const char *format, time_t time, const char *tag,
     flb_sds_destroy(tmp);
     tmp = NULL;
 
-    /* A string no longer than S3_KEY_SIZE is created to store the formatted timestamp. */
-    key = flb_calloc(1, S3_KEY_SIZE * sizeof(char));
+    /* A string no longer than S3_KEY_SIZE + 1 is created to store the formatted timestamp. */
+    key = flb_calloc(1, (S3_KEY_SIZE + 1) * sizeof(char));
     if (!key) {
         goto error;
     }
@@ -1000,9 +1003,9 @@ size_t flb_aws_strftime_precision(char **out_buf, const char *time_format,
 
     /* Replace %3N to millisecond, %9N and %L to nanosecond in time_format. */
     snprintf(millisecond_str, FLB_AWS_MILLISECOND_FORMATTER_LENGTH+1,
-             "%" PRIu64, (uint64_t) tms->tm.tv_nsec / 1000000);
+             "%03" PRIu64, (uint64_t) tms->tm.tv_nsec / 1000000);
     snprintf(nanosecond_str, FLB_AWS_NANOSECOND_FORMATTER_LENGTH+1,
-             "%" PRIu64, (uint64_t) tms->tm.tv_nsec);
+             "%09" PRIu64, (uint64_t) tms->tm.tv_nsec);
     for (i = 0; i < time_format_len; i++) {
         if (strncmp(time_format+i, FLB_AWS_MILLISECOND_FORMATTER, 3) == 0) {
             strncat(tmp_parsed_time_str, millisecond_str,
@@ -1026,6 +1029,8 @@ size_t flb_aws_strftime_precision(char **out_buf, const char *time_format,
 
     tmp = gmtime_r(&tms->tm.tv_sec, &timestamp);
     if (!tmp) {
+        flb_free(tmp_parsed_time_str);
+        flb_free(buf);
         return 0;
     }
 

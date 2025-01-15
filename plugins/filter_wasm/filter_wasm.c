@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -56,6 +56,7 @@ static int cb_wasm_filter(const void *data, size_t bytes,
     size_t json_size;
     int root_type;
     struct flb_wasm *wasm = NULL;
+    size_t buf_size;
 
     struct flb_filter_wasm *ctx = filter_context;
     struct flb_log_event_encoder log_encoder;
@@ -87,7 +88,8 @@ static int cb_wasm_filter(const void *data, size_t bytes,
         return FLB_FILTER_NOTOUCH;
     }
 
-    wasm = flb_wasm_instantiate(config, ctx->wasm_path, ctx->accessible_dir_list, -1, -1, -1);
+    wasm = flb_wasm_instantiate(config, ctx->wasm_path, ctx->accessible_dir_list,
+                                ctx->wasm_conf);
     if (wasm == NULL) {
         flb_plg_debug(ctx->ins, "instantiate wasm [%s] failed", ctx->wasm_path);
         goto on_error;
@@ -99,23 +101,44 @@ static int cb_wasm_filter(const void *data, size_t bytes,
         off = log_decoder.offset;
         alloc_size = (off - last_off) + 128; /* JSON is larger than msgpack */
         last_off = off;
+        switch(ctx->event_format) {
+        case FLB_FILTER_WASM_FMT_JSON:
+            /* Encode as JSON from msgpack */
+            buf = flb_msgpack_to_json_str(alloc_size, log_event.body);
 
-        /* Encode as JSON from msgpack */
-        buf = flb_msgpack_to_json_str(alloc_size, log_event.body);
+            if (buf) {
+                /* Execute WASM program */
+                ret_val = flb_wasm_call_function_format_json(wasm, ctx->wasm_function_name,
+                                                             tag, tag_len,
+                                                             log_event.timestamp,
+                                                             buf, strlen(buf));
 
-        if (buf) {
+                flb_free(buf);
+            }
+            else {
+                flb_plg_error(ctx->ins, "encode as JSON from msgpack is failed");
+
+                goto on_error;
+            }
+            break;
+        case FLB_FILTER_WASM_FMT_MSGPACK:
+            ret = flb_wasm_format_msgpack_mode(tag, tag_len,
+                                               &log_event,
+                                               (void **)&buf, &buf_size);
+            if (ret < 0) {
+                flb_plg_error(ctx->ins, "format msgpack is failed");
+
+                goto on_error;
+            }
+
             /* Execute WASM program */
-            ret_val = flb_wasm_call_function_format_json(wasm, ctx->wasm_function_name,
-                                                         tag, tag_len,
-                                                         log_event.timestamp,
-                                                         buf, strlen(buf));
+            ret_val = flb_wasm_call_function_format_msgpack(wasm, ctx->wasm_function_name,
+                                                            tag, tag_len,
+                                                            log_event.timestamp,
+                                                            buf, buf_size);
 
             flb_free(buf);
-        }
-        else {
-            flb_plg_error(ctx->ins, "encode as JSON from msgpack is failed");
-
-            goto on_error;
+            break;
         }
 
         if (ret_val == NULL) { /* Skip record */
@@ -123,8 +146,8 @@ static int cb_wasm_filter(const void *data, size_t bytes,
             continue;
         }
 
-        
-        if (strlen(ret_val) == 0) { /* Skip record */
+        if (ctx->event_format == FLB_FILTER_WASM_FMT_JSON &&
+            strlen(ret_val) == 0) { /* Skip record */
             flb_plg_debug(ctx->ins, "WASM function returned empty string. Skip.");
             flb_free(ret_val);
             continue;
@@ -144,16 +167,38 @@ static int cb_wasm_filter(const void *data, size_t bytes,
         }
 
         if (ret == FLB_EVENT_ENCODER_SUCCESS) {
-            /* Convert JSON payload to msgpack */
-            ret = flb_pack_json(ret_val, strlen(ret_val),
-                                &json_buf, &json_size, &root_type, NULL);
+            switch(ctx->event_format) {
+            case FLB_FILTER_WASM_FMT_JSON:
+                /* Convert JSON payload to msgpack */
+                ret = flb_pack_json(ret_val, strlen(ret_val),
+                                    &json_buf, &json_size, &root_type, NULL);
 
-            if (ret == 0 && root_type == JSMN_OBJECT) {
-                /* JSON found, pack it msgpack representation */
+                if (ret == 0 && root_type == JSMN_OBJECT) {
+                    /* JSON found, pack it msgpack representation */
+                    ret = flb_log_event_encoder_set_body_from_raw_msgpack(
+                            &log_encoder,
+                            json_buf,
+                            json_size);
+
+                    if (ret == FLB_EVENT_ENCODER_SUCCESS) {
+                        ret = flb_log_event_encoder_commit_record(&log_encoder);
+                    }
+                    else {
+                        flb_log_event_encoder_rollback_record(&log_encoder);
+                    }
+                }
+                else {
+                    flb_plg_error(ctx->ins, "invalid JSON format. ret: %d, buf: %s", ret, ret_val);
+
+                    flb_log_event_encoder_rollback_record(&log_encoder);
+                }
+                break;
+            case FLB_FILTER_WASM_FMT_MSGPACK:
+                /* msgpack found, pack it msgpack representation */
                 ret = flb_log_event_encoder_set_body_from_raw_msgpack(
                         &log_encoder,
-                        json_buf,
-                        json_size);
+                        ret_val,
+                        strlen(ret_val));
 
                 if (ret == FLB_EVENT_ENCODER_SUCCESS) {
                     ret = flb_log_event_encoder_commit_record(&log_encoder);
@@ -161,11 +206,8 @@ static int cb_wasm_filter(const void *data, size_t bytes,
                 else {
                     flb_log_event_encoder_rollback_record(&log_encoder);
                 }
-            }
-            else {
-                flb_plg_error(ctx->ins, "invalid JSON format. ret: %d, buf: %s", ret, ret_val);
 
-                flb_log_event_encoder_rollback_record(&log_encoder);
+                break;
             }
         }
         else {
@@ -177,9 +219,11 @@ static int cb_wasm_filter(const void *data, size_t bytes,
             flb_free(ret_val);
         }
 
-        /* release 'json_buf' if it was allocated */
-        if (json_buf != NULL) {
-            flb_free(json_buf);
+        if (ctx->event_format == FLB_FILTER_WASM_FMT_JSON) {
+            /* release 'json_buf' if it was allocated */
+            if (json_buf != NULL) {
+                flb_free(json_buf);
+            }
         }
     }
 
@@ -247,9 +291,9 @@ static void delete_wasm_config(struct flb_filter_wasm *ctx)
     flb_free(ctx);
 }
 
-/* Initialize plugin */
-static int cb_wasm_init(struct flb_filter_instance *f_ins,
-                        struct flb_config *config, void *data)
+/* Check existence of wasm program binary */
+static int cb_wasm_pre_run(struct flb_filter_instance *f_ins,
+                           struct flb_config *config, void *data)
 {
     struct flb_filter_wasm *ctx = NULL;
     int ret = -1;
@@ -263,10 +307,76 @@ static int cb_wasm_init(struct flb_filter_instance *f_ins,
     /* Initialize exec config */
     ret = filter_wasm_config_read(ctx, f_ins, config);
     if (ret < 0) {
+        goto pre_run_error;
+    }
+
+    /* Check accessibility for the wasm path */
+    ret = access(ctx->wasm_path, R_OK);
+    if (ret != 0) {
+        goto pre_run_error;
+    }
+
+    delete_wasm_config(ctx);
+
+    return 0;
+
+pre_run_error:
+    delete_wasm_config(ctx);
+
+    return -1;
+}
+
+/* Initialize plugin */
+static int cb_wasm_init(struct flb_filter_instance *f_ins,
+                        struct flb_config *config, void *data)
+{
+    struct flb_filter_wasm *ctx = NULL;
+    struct flb_wasm_config *wasm_conf = NULL;
+    int ret = -1;
+    const char *tmp;
+    int event_format;
+
+    /* Allocate space for the configuration */
+    ctx = flb_calloc(1, sizeof(struct flb_filter_wasm));
+    if (!ctx) {
+        return -1;
+    }
+
+    /* Initialize exec config */
+    ret = filter_wasm_config_read(ctx, f_ins, config);
+    if (ret < 0) {
         goto init_error;
     }
 
+    tmp = flb_filter_get_property("event_format", f_ins);
+    if (tmp) {
+        if (strcasecmp(tmp, FLB_FMT_STR_JSON) == 0) {
+            event_format = FLB_FILTER_WASM_FMT_JSON;
+        }
+        else if (strcasecmp(tmp, FLB_FMT_STR_MSGPACK) == 0) {
+            event_format = FLB_FILTER_WASM_FMT_MSGPACK;
+        } else {
+            flb_error("[filter_wasm] unknown format: %s", tmp);
+            goto init_error;
+        }
+        ctx->event_format = event_format;
+    } else {
+        ctx->event_format = FLB_FILTER_WASM_FMT_JSON;
+    }
+
     flb_wasm_init(config);
+    wasm_conf = flb_wasm_config_init(config);
+    if (wasm_conf == NULL) {
+        goto init_error;
+    }
+    ctx->wasm_conf = wasm_conf;
+
+    if (ctx->wasm_heap_size > FLB_WASM_DEFAULT_HEAP_SIZE) {
+        wasm_conf->heap_size = ctx->wasm_heap_size;
+    }
+    if (ctx->wasm_stack_size > FLB_WASM_DEFAULT_STACK_SIZE) {
+        wasm_conf->stack_size = ctx->wasm_stack_size;
+    }
 
     /* Set context */
     flb_filter_set_context(f_ins, ctx);
@@ -282,12 +392,18 @@ static int cb_wasm_exit(void *data, struct flb_config *config)
 {
     struct flb_filter_wasm *ctx = data;
 
+    flb_wasm_config_destroy(ctx->wasm_conf);
     flb_wasm_destroy_all(config);
     delete_wasm_config(ctx);
     return 0;
 }
 
 static struct flb_config_map config_map[] = {
+    {
+     FLB_CONFIG_MAP_STR, "event_format", NULL,
+     0, FLB_FALSE, 0,
+     "Sepecify the ingesting event format for wasm program"
+    },
     {
      FLB_CONFIG_MAP_STR, "wasm_path", NULL,
      0, FLB_TRUE, offsetof(struct flb_filter_wasm, wasm_path),
@@ -304,6 +420,16 @@ static struct flb_config_map config_map[] = {
      0, FLB_TRUE, offsetof(struct flb_filter_wasm, wasm_function_name),
      "Set the function name in wasm to execute"
     },
+    {
+      FLB_CONFIG_MAP_SIZE, "wasm_heap_size", DEFAULT_WASM_HEAP_SIZE,
+      0, FLB_TRUE, offsetof(struct flb_filter_wasm, wasm_heap_size),
+      "Set the heap size of wasm runtime"
+    },
+    {
+      FLB_CONFIG_MAP_SIZE, "wasm_stack_size", DEFAULT_WASM_STACK_SIZE,
+      0, FLB_TRUE, offsetof(struct flb_filter_wasm, wasm_stack_size),
+      "Set the stack size of wasm runtime"
+    },
     /* EOF */
     {0}
 };
@@ -311,6 +437,7 @@ static struct flb_config_map config_map[] = {
 struct flb_filter_plugin filter_wasm_plugin = {
     .name         = "wasm",
     .description  = "WASM program filter",
+    .cb_pre_run   = cb_wasm_pre_run,
     .cb_init      = cb_wasm_init,
     .cb_filter    = cb_wasm_filter,
     .cb_exit      = cb_wasm_exit,

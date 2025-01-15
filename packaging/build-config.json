@@ -13,6 +13,10 @@
           "type": "rpm"
         },
         {
+          "target": "amazonlinux/2023.arm64v8",
+          "type": "rpm"
+        },
+        {
           "target": "centos/7",
           "type": "rpm"
         },
@@ -89,11 +93,23 @@
           "type": "deb"
         },
         {
+          "target": "ubuntu/24.04",
+          "type": "deb"
+        },
+        {
+          "target": "ubuntu/24.04.arm64v8",
+          "type": "deb"
+        },
+        {
           "target": "raspbian/buster",
           "type": "deb"
         },
         {
           "target": "raspbian/bullseye",
+          "type": "deb"
+        },
+        {
+          "target": "raspbian/bookworm",
           "type": "deb"
         }
       ],

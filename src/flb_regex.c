@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -64,12 +64,18 @@ static OnigOptionType check_option(const char *start, const char *end, char **ne
 
     if (start == NULL || end == NULL || new_end == NULL) {
         return ONIG_OPTION_DEFAULT;
-    } else if (start[0] != '/') {
+    }
+    else if (start[0] != '/') {
         *new_end = NULL;
         return ONIG_OPTION_DEFAULT;
     }
 
     chr = strrchr(start, '/');
+    if (!chr) {
+        *new_end = NULL;
+        return ONIG_OPTION_DEFAULT;
+    }
+
     if (chr == start || chr == end) {
         *new_end = NULL;
         return ONIG_OPTION_DEFAULT;
@@ -140,7 +146,6 @@ static int str_to_regex(const char *pattern, OnigRegex *reg)
                    ONIG_ENCODING_UTF8, ONIG_SYNTAX_RUBY, &einfo);
 
     if (ret != ONIG_NORMAL) {
-        printf("ret=%d. start=%s end=%c\n", ret, start, *end);
         return -1;
     }
     return 0;

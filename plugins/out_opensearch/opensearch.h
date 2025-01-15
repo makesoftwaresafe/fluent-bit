@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -51,13 +51,17 @@
 #define OS_BULK_UPDATE_OP_BODY       "{\"doc\":"
 #define OS_BULK_UPSERT_OP_BODY       "{\"doc_as_upsert\":true,\"doc\":"
 
+/* Supported compression algorithms */
+#define FLB_OS_COMPRESSION_NONE 0
+#define FLB_OS_COMPRESSION_GZIP 1
+
 struct flb_opensearch {
     /* OpenSearch index (database) and type (table) */
     flb_sds_t index;
     struct flb_record_accessor *ra_index;
 
     char *type;
-    char suppress_type_name;
+    int suppress_type_name;
 
     /* HTTP Auth */
     char *http_user;
@@ -127,7 +131,7 @@ struct flb_opensearch {
     /* id_key */
     flb_sds_t id_key;
     struct flb_record_accessor *ra_id_key;
-    
+
     /* include_tag_key */
     int include_tag_key;
     flb_sds_t tag_key;
@@ -142,6 +146,10 @@ struct flb_opensearch {
 
     /* Plugin output instance reference */
     struct flb_output_instance *ins;
+
+    /* Compression algorithm */
+    int compression;
+    flb_sds_t compression_str;
 };
 
 #endif

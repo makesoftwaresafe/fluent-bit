@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -59,15 +59,30 @@ static int in_exec_wasi_collect(struct flb_input_instance *ins,
     size_t out_size = 0;
     struct flb_time out_time;
 
+    /* Validate the temporary file was created */
+    if (stdoutp == NULL) {
+        flb_plg_error(ctx->ins, "failed to created temporary file");
+        return -1;
+    }
+
     if (ctx->oneshot == FLB_TRUE) {
         ret = flb_pipe_r(ctx->ch_manager[0], &val, sizeof(val));
         if (ret == -1) {
+            fclose(stdoutp);
             flb_errno();
             return -1;
         }
     }
 
-    wasm = flb_wasm_instantiate(config, ctx->wasi_path, ctx->accessible_dir_list, -1, fileno(stdoutp), -1);
+    if (ctx->wasm_conf == NULL) {
+        flb_plg_error(ctx->ins, "wasm_conf cannot be NULL");
+        fclose(stdoutp);
+        return -1;
+    }
+    ctx->wasm_conf->stdoutfd = fileno(stdoutp);
+
+    wasm = flb_wasm_instantiate(config, ctx->wasi_path, ctx->accessible_dir_list,
+                                ctx->wasm_conf);
     if (wasm == NULL) {
         flb_plg_debug(ctx->ins, "instantiate wasm [%s] failed", ctx->wasi_path);
         goto collect_end;
@@ -282,6 +297,7 @@ static int in_exec_wasi_init(struct flb_input_instance *in,
                         struct flb_config *config, void *data)
 {
     struct flb_exec_wasi *ctx = NULL;
+    struct flb_wasm_config *wasm_conf = NULL;
     int ret = -1;
 
     /* Allocate space for the configuration */
@@ -334,6 +350,20 @@ static int in_exec_wasi_init(struct flb_input_instance *in,
         flb_plg_error(in, "could not set collector for exec input plugin");
         goto init_error;
     }
+
+    wasm_conf = flb_wasm_config_init(config);
+    if (wasm_conf == NULL) {
+        goto init_error;
+    }
+    ctx->wasm_conf = wasm_conf;
+
+    if (ctx->wasm_heap_size > FLB_WASM_DEFAULT_HEAP_SIZE) {
+        wasm_conf->heap_size = ctx->wasm_heap_size;
+    }
+    if (ctx->wasm_stack_size > FLB_WASM_DEFAULT_STACK_SIZE) {
+        wasm_conf->stack_size = ctx->wasm_stack_size;
+    }
+
     ctx->coll_fd = ret;
 
     return 0;
@@ -384,6 +414,7 @@ static int in_exec_wasi_exit(void *data, struct flb_config *config)
 {
     struct flb_exec_wasi *ctx = data;
 
+    flb_wasm_config_destroy(ctx->wasm_conf);
     flb_wasm_destroy_all(config);
     delete_exec_wasi_config(ctx);
     return 0;
@@ -425,6 +456,16 @@ static struct flb_config_map config_map[] = {
       FLB_CONFIG_MAP_BOOL, "bool", "false",
       0, FLB_TRUE, offsetof(struct flb_exec_wasi, oneshot),
       "execute the command only once"
+    },
+    {
+      FLB_CONFIG_MAP_SIZE, "wasm_heap_size", DEFAULT_WASM_HEAP_SIZE,
+      0, FLB_TRUE, offsetof(struct flb_exec_wasi, wasm_heap_size),
+      "Set the heap size of wasm runtime"
+    },
+    {
+      FLB_CONFIG_MAP_SIZE, "wasm_stack_size", DEFAULT_WASM_STACK_SIZE,
+      0, FLB_TRUE, offsetof(struct flb_exec_wasi, wasm_stack_size),
+      "Set the stack size of wasm runtime"
     },
     /* EOF */
     {0}

@@ -81,7 +81,7 @@ static int generate_dummy_array_attribute_set(struct cfl_array **out_array, size
     }
 
     cfl_array_append_string(array, "string value");
-    cfl_array_append_bytes(array, "\xFF\xEE\xFF\xEE\xCA\xFE", 6);
+    cfl_array_append_bytes(array, "\xFF\xEE\xFF\xEE\xCA\xFE", 6, CFL_FALSE);
     cfl_array_append_bool(array, CTR_TRUE);
     cfl_array_append_int64(array, 303456);
     cfl_array_append_double(array, 1.23456);
@@ -164,7 +164,7 @@ static int generate_dummy_kvlist_attribute_set(struct cfl_kvlist **out_kvlist, s
         return -3;
     }
 
-    result = cfl_kvlist_insert_bytes(kvlist, "bytes value", "\xFE\xEE\xFF\xEE\xCA\xFE", 6);
+    result = cfl_kvlist_insert_bytes(kvlist, "bytes value", "\xFE\xEE\xFF\xEE\xCA\xFE", 6, CFL_FALSE);
 
     if (result != 0) {
         return -3;
@@ -429,6 +429,81 @@ static struct ctrace *generate_encoder_test_data()
     return context;
 }
 
+static int generate_sample_resource_minimal_attributes(struct ctrace_resource *resource)
+{
+    struct ctrace_attributes *attributes;
+    int                       result;
+
+    attributes = ctr_attributes_create();
+
+    if (attributes == NULL) {
+        return -1;
+    }
+
+    result = ctr_attributes_set_string(attributes, "receiver.tool", "ctraces");
+
+    if (result != 0) {
+        ctr_attributes_destroy(attributes);
+
+        return -2;
+    }
+
+    result = ctr_resource_set_attributes(resource, attributes);
+
+    if (result != 0) {
+        ctr_attributes_destroy(attributes);
+
+        return -3;
+    }
+
+    return 0;
+}
+
+static struct ctrace *generate_encoder_test_data_with_empty_spans()
+{
+    struct ctrace_resource_span *resource_span;
+    struct ctrace_scope_span    *scope_span;
+    struct ctrace               *context;
+    int                          result;
+
+    context = ctr_create(NULL);
+
+    if (context == NULL) {
+        return NULL;
+    }
+
+    resource_span = ctr_resource_span_create(context);
+
+    if (resource_span == NULL) {
+        ctr_destroy(context);
+
+        return NULL;
+    }
+
+    ctr_resource_span_set_schema_url(resource_span, "");
+    ctr_resource_set_dropped_attr_count(resource_span->resource, 0);
+
+    result = generate_sample_resource_minimal_attributes(resource_span->resource);
+
+    if (result != 0) {
+        ctr_destroy(context);
+
+        return NULL;
+    }
+
+    scope_span = ctr_scope_span_create(resource_span);
+
+    if (scope_span == NULL) {
+        ctr_destroy(context);
+
+        return NULL;
+    }
+
+    ctr_scope_span_set_schema_url(scope_span, "");
+
+    return context;
+}
+
 /*
  * perform the following and then compare text buffers
  *
@@ -480,6 +555,24 @@ void test_msgpack_to_cmt()
 
     msgpack_encode_decode_and_compare(context);
 
+    ctr_destroy(context);
+}
+
+void test_msgpack_to_ctr_with_empty_spans()
+{
+    struct ctrace *context;
+    char          *referece_text_buffer;
+
+    context = generate_encoder_test_data_with_empty_spans();
+    TEST_ASSERT(context != NULL);
+
+    referece_text_buffer = ctr_encode_text_create(context);
+    TEST_ASSERT(referece_text_buffer != NULL);
+
+    printf("%s\n", referece_text_buffer);
+    msgpack_encode_decode_and_compare(context);
+
+    ctr_encode_text_destroy(referece_text_buffer);
     ctr_destroy(context);
 }
 
@@ -581,7 +674,7 @@ void test_simple_to_msgpack_and_back()
     ctr_span_event_set_attribute_string(event, "syscall 3", "write()");
 
     /* add a key/value pair list */
-    kv = cfl_kvlist_create(1);
+    kv = cfl_kvlist_create();
     TEST_ASSERT(kv != NULL);
     cfl_kvlist_insert_string(kv, "language", "c");
 
@@ -640,5 +733,6 @@ void test_simple_to_msgpack_and_back()
 TEST_LIST = {
     {"cmt_simple_to_msgpack_and_back", test_simple_to_msgpack_and_back},
     {"cmt_msgpack",                    test_msgpack_to_cmt},
+    {"empty_spans",                    test_msgpack_to_ctr_with_empty_spans},
     { 0 }
 };

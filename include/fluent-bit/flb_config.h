@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -48,11 +48,11 @@ struct flb_config {
     int is_running;           /* service running ?              */
     double flush;             /* Flush timeout                  */
 
-    /* 
-     * Maximum grace time on shutdown. If set to -1, the engine will 
+    /*
+     * Maximum grace time on shutdown. If set to -1, the engine will
      * shutdown when all remaining tasks are flushed
      */
-    int grace; 
+    int grace;
     int grace_count;          /* Count of grace shutdown tries  */
     flb_pipefd_t flush_fd;    /* Timer FD associated to flush   */
     int convert_nan_to_null;  /* convert null to nan ?          */
@@ -70,6 +70,10 @@ struct flb_config {
     flb_pipefd_t ch_notif[2];       /* channel to receive notifications       */
 
     flb_pipefd_t ch_self_events[2]; /* channel to recieve thread tasks        */
+
+    int notification_channels_initialized;
+    flb_pipefd_t notification_channels[2];
+    struct mk_event notification_event;
 
     /* Channel event loop (just for ch_notif) */
     struct mk_event_loop *ch_evl;
@@ -213,6 +217,7 @@ struct flb_config {
     char *dns_mode;
     char *dns_resolver;
     int   dns_prefer_ipv4;
+    int   dns_prefer_ipv6;
 
     /* Chunk I/O Buffering */
     void *cio;
@@ -225,6 +230,7 @@ struct flb_config {
     int   storage_del_bad_chunks;   /* delete irrecoverable chunks */
     char *storage_bl_mem_limit;     /* storage backlog memory limit */
     struct flb_storage_metrics *storage_metrics_ctx; /* storage metrics context */
+    int   storage_trim_files;       /* enable/disable file trimming */
 
     /* Embedded SQL Database support (SQLite3) */
 #ifdef FLB_HAVE_SQLDB
@@ -244,6 +250,7 @@ struct flb_config {
 #ifdef FLB_HAVE_STREAM_PROCESSOR
     char *stream_processor_file;            /* SP configuration file */
     void *stream_processor_ctx;             /* SP context */
+    int  stream_processor_str_conv;         /* SP enable converting from string to number */
 
     /*
      * Temporal list to hold tasks defined before the SP context is created
@@ -257,6 +264,10 @@ struct flb_config {
 #endif /* FLB_HAVE_CHUNK_TRACE */
 
     int enable_hot_reload;
+    int ensure_thread_safety_on_hot_reloading;
+    unsigned int hot_reloaded_count;
+    int shutdown_by_hot_reloading;
+    int hot_reloading;
 
     /* Co-routines */
     unsigned int coro_stack_size;
@@ -319,6 +330,7 @@ enum conf_type {
 #define FLB_CONF_STR_PARSERS_FILE "Parsers_File"
 #define FLB_CONF_STR_PLUGINS_FILE "Plugins_File"
 #define FLB_CONF_STR_STREAMS_FILE "Streams_File"
+#define FLB_CONF_STR_STREAMS_STR_CONV "sp.convert_from_str_to_num"
 #define FLB_CONF_STR_CONV_NAN     "json.convert_nan_to_null"
 
 /* FLB_HAVE_HTTP_SERVER */
@@ -337,11 +349,13 @@ enum conf_type {
 #endif /* FLB_HAVE_CHUNK_TRACE */
 
 #define FLB_CONF_STR_HOT_RELOAD        "Hot_Reload"
+#define FLB_CONF_STR_HOT_RELOAD_ENSURE_THREAD_SAFETY  "Hot_Reload.Ensure_Thread_Safety"
 
 /* DNS */
 #define FLB_CONF_DNS_MODE              "dns.mode"
 #define FLB_CONF_DNS_RESOLVER          "dns.resolver"
 #define FLB_CONF_DNS_PREFER_IPV4       "dns.prefer_ipv4"
+#define FLB_CONF_DNS_PREFER_IPV6       "dns.prefer_ipv6"
 
 /* Storage / Chunk I/O */
 #define FLB_CONF_STORAGE_PATH          "storage.path"
@@ -352,6 +366,7 @@ enum conf_type {
 #define FLB_CONF_STORAGE_MAX_CHUNKS_UP "storage.max_chunks_up"
 #define FLB_CONF_STORAGE_DELETE_IRRECOVERABLE_CHUNKS \
                                        "storage.delete_irrecoverable_chunks"
+#define FLB_CONF_STORAGE_TRIM_FILES    "storage.trim_files"
 
 /* Coroutines */
 #define FLB_CONF_STR_CORO_STACK_SIZE "Coro_Stack_Size"

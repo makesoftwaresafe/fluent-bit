@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -51,6 +51,8 @@ static int cb_alter_size_init(struct flb_filter_instance *ins,
     if (ctx->log_decoder == NULL) {
         flb_plg_error(ins, "could not initialize event decoder");
 
+        flb_free(ctx);
+
         return -1;
     }
 
@@ -58,7 +60,9 @@ static int cb_alter_size_init(struct flb_filter_instance *ins,
 
     if (ctx->log_encoder == NULL) {
         flb_plg_error(ins, "could not initialize event encoder");
+
         flb_log_event_decoder_destroy(ctx->log_decoder);
+        flb_free(ctx);
 
         return -1;
     }

@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -47,8 +47,12 @@ struct flb_plugins {
 struct flb_plugins *flb_plugin_create();
 int flb_plugin_load(char *path, struct flb_plugins *ctx,
                     struct flb_config *config);
+
 int flb_plugin_load_router(char *path, struct flb_config *config);
+
 int flb_plugin_load_config_file(const char *file, struct flb_config *config);
+int flb_plugin_load_config_format(struct flb_cf *cf, struct flb_config *config);
+
 void flb_plugin_destroy(struct flb_plugins *ctx);
 
 #endif

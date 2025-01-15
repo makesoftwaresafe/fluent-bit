@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -145,6 +145,8 @@ static int bigquery_jwt_encode(struct flb_bigquery *ctx,
 
     /* In mbedTLS cert length must include the null byte */
     len = strlen(secret) + 1;
+
+    sig_len = sizeof(sig);
 
     ret = flb_crypto_sign_simple(FLB_CRYPTO_PRIVATE_KEY,
                                  FLB_CRYPTO_PADDING_PKCS1,

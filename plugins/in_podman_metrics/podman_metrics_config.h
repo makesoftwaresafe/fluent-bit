@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -106,6 +106,7 @@
 #define V2_SYSFS_FILE_MEMORY_LIMIT     "memory.max"
 #define V2_SYSFS_FILE_CPU_STAT         "cpu.stat"
 #define V2_SYSFS_FILE_PIDS             "cgroup.procs"
+#define V2_SYSFS_FILE_PIDS_ALT         "containers/cgroup.procs"
 
 /* Values used to construct counters/gauges names and descriptions */
 #define COUNTER_PREFIX                  "container"

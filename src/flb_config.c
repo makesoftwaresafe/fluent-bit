@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -125,6 +125,10 @@ struct flb_service_config service_configs[] = {
      FLB_CONF_TYPE_BOOL,
      offsetof(struct flb_config, dns_prefer_ipv4)},
 
+    {FLB_CONF_DNS_PREFER_IPV6,
+     FLB_CONF_TYPE_BOOL,
+     offsetof(struct flb_config, dns_prefer_ipv6)},
+
     /* Storage */
     {FLB_CONF_STORAGE_PATH,
      FLB_CONF_TYPE_STR,
@@ -147,6 +151,9 @@ struct flb_service_config service_configs[] = {
     {FLB_CONF_STORAGE_DELETE_IRRECOVERABLE_CHUNKS,
      FLB_CONF_TYPE_BOOL,
      offsetof(struct flb_config, storage_del_bad_chunks)},
+    {FLB_CONF_STORAGE_TRIM_FILES,
+     FLB_CONF_TYPE_BOOL,
+     offsetof(struct flb_config, storage_trim_files)},
 
     /* Coroutines */
     {FLB_CONF_STR_CORO_STACK_SIZE,
@@ -165,6 +172,9 @@ struct flb_service_config service_configs[] = {
     {FLB_CONF_STR_STREAMS_FILE,
      FLB_CONF_TYPE_STR,
      offsetof(struct flb_config, stream_processor_file)},
+    {FLB_CONF_STR_STREAMS_STR_CONV,
+     FLB_CONF_TYPE_BOOL,
+     offsetof(struct flb_config, stream_processor_str_conv)},
 #endif
 
 #ifdef FLB_HAVE_CHUNK_TRACE
@@ -176,6 +186,10 @@ struct flb_service_config service_configs[] = {
     {FLB_CONF_STR_HOT_RELOAD,
      FLB_CONF_TYPE_BOOL,
      offsetof(struct flb_config, enable_hot_reload)},
+
+    {FLB_CONF_STR_HOT_RELOAD_ENSURE_THREAD_SAFETY,
+     FLB_CONF_TYPE_BOOL,
+     offsetof(struct flb_config, ensure_thread_safety_on_hot_reloading)},
 
     {NULL, FLB_CONF_TYPE_OTHER, 0} /* end of array */
 };
@@ -268,6 +282,12 @@ struct flb_config *flb_config_init()
     config->sched_cap  = FLB_SCHED_CAP;
     config->sched_base = FLB_SCHED_BASE;
 
+    /* reload */
+    config->ensure_thread_safety_on_hot_reloading = FLB_TRUE;
+    config->hot_reloaded_count = 0;
+    config->shutdown_by_hot_reloading = FLB_FALSE;
+    config->hot_reloading = FLB_FALSE;
+
 #ifdef FLB_HAVE_SQLDB
     mk_list_init(&config->sqldb_list);
 #endif
@@ -278,6 +298,7 @@ struct flb_config *flb_config_init()
 
 #ifdef FLB_HAVE_STREAM_PROCESSOR
     flb_slist_create(&config->stream_processor_tasks);
+    config->stream_processor_str_conv = FLB_TRUE;
 #endif
 
     flb_slist_create(&config->external_plugins);
@@ -369,12 +390,12 @@ void flb_config_exit(struct flb_config *config)
     struct mk_list *head;
     struct flb_cf *cf;
 
-    if (config->log_file) {
-        flb_free(config->log_file);
-    }
-
     if (config->log) {
         flb_log_destroy(config->log, config);
+    }
+
+    if (config->log_file) {
+        flb_free(config->log_file);
     }
 
     if (config->parsers_file) {
@@ -386,8 +407,7 @@ void flb_config_exit(struct flb_config *config)
     }
 
     if (config->kernel) {
-        flb_free(config->kernel->s_version.data);
-        flb_free(config->kernel);
+        flb_kernel_destroy(config->kernel);
     }
 
     /* release resources */
@@ -397,8 +417,7 @@ void flb_config_exit(struct flb_config *config)
 
     /* Pipe */
     if (config->ch_data[0]) {
-        mk_event_closesocket(config->ch_data[0]);
-        mk_event_closesocket(config->ch_data[1]);
+        flb_pipe_destroy(config->ch_data);
     }
 
     /* Channel manager */
@@ -758,7 +777,7 @@ static int configure_plugins_type(struct flb_config *config, struct flb_cf *cf, 
         /* validate the instance creation */
         if (!ins) {
             flb_error("[config] section '%s' tried to instance a plugin name "
-                      "that don't exists", name);
+                      "that doesn't exist", name);
             flb_sds_destroy(name);
             return -1;
         }
@@ -773,6 +792,11 @@ static int configure_plugins_type(struct flb_config *config, struct flb_cf *cf, 
             if (strcasecmp(kv->key, "name") == 0) {
                 continue;
             }
+
+            /* set ret to -1 to ensure that we treat any unhandled plugin or
+             * value types as errors.
+             */
+            ret = -1;
 
             if (type == FLB_CF_CUSTOM) {
                 if (kv->val->type == CFL_VARIANT_STRING) {
@@ -883,11 +907,21 @@ int flb_config_load_config_format(struct flb_config *config, struct flb_cf *cf)
         /* Extra sanity checks */
         if (strcasecmp(s->name, "parser") == 0 ||
             strcasecmp(s->name, "multiline_parser") == 0) {
-            fprintf(stderr,
-                    "Sections 'multiline_parser' and 'parser' are not valid in "
-                    "the main configuration file. It belongs to \n"
-                    "the 'parsers_file' configuration files.\n");
-            return -1;
+
+            /*
+             * Classic mode configuration don't allow parser or multiline_parser
+             * to be defined in the main configuration file.
+             */
+            if (cf->format == FLB_CF_CLASSIC) {
+                fprintf(stderr,
+                        "Sections 'multiline_parser' and 'parser' are not valid in "
+                        "the main configuration file. It belongs to \n"
+                        "the 'parsers_file' configuration files.\n");
+                return -1;
+            }
+            else {
+                /* Yaml allow parsers definitions in any Yaml file, all good */
+            }
         }
     }
 
@@ -899,6 +933,21 @@ int flb_config_load_config_format(struct flb_config *config, struct flb_cf *cf)
             ckv = cfl_list_entry(chead, struct cfl_kvpair, _head);
             flb_config_set_property(config, ckv->key, ckv->val->data.as_string);
         }
+    }
+
+    ret = flb_parser_load_parser_definitions("", cf, config);
+    if (ret == -1) {
+        return -1;
+    }
+
+    ret = flb_parser_load_multiline_parser_definitions("", cf, config);
+    if (ret == -1) {
+        return -1;
+    }
+
+    ret = flb_plugin_load_config_format(cf, config);
+    if (ret == -1) {
+        return -1;
     }
 
     ret = configure_plugins_type(config, cf, FLB_CF_CUSTOM);
