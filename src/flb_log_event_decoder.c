@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 
 #include <fluent-bit/flb_log_event_decoder.h>
 #include <fluent-bit/flb_byteswap.h>
+#include <fluent-bit/flb_compat.h>
 
 static int create_empty_map(struct flb_log_event_decoder *context) {
     msgpack_packer  packer;
@@ -70,10 +71,24 @@ void flb_log_event_decoder_reset(struct flb_log_event_decoder *context,
     context->offset = 0;
     context->buffer = input_buffer;
     context->length = input_length;
+    context->last_result = FLB_EVENT_DECODER_ERROR_INSUFFICIENT_DATA;
 
     msgpack_unpacked_destroy(&context->unpacked_event);
     msgpack_unpacked_init(&context->unpacked_event);
+}
 
+int flb_log_event_decoder_read_groups(struct flb_log_event_decoder *context,
+                                      int read_groups)
+{
+    if (context == NULL) {
+        return -1;
+    }
+
+    if (read_groups != FLB_TRUE && read_groups != FLB_FALSE) {
+        return -1;
+    }
+    context->read_groups = read_groups;
+    return 0;
 }
 
 int flb_log_event_decoder_init(struct flb_log_event_decoder *context,
@@ -88,6 +103,7 @@ int flb_log_event_decoder_init(struct flb_log_event_decoder *context,
 
     context->dynamically_allocated = FLB_FALSE;
     context->initialized = FLB_TRUE;
+    context->read_groups = FLB_TRUE;
 
     flb_log_event_decoder_reset(context, input_buffer, input_length);
 
@@ -110,10 +126,8 @@ struct flb_log_event_decoder *flb_log_event_decoder_create(
 
     if (context != NULL) {
         context->dynamically_allocated = FLB_TRUE;
-
         if (result != FLB_EVENT_DECODER_SUCCESS) {
             flb_log_event_decoder_destroy(context);
-
             context = NULL;
         }
     }
@@ -144,7 +158,7 @@ void flb_log_event_decoder_destroy(struct flb_log_event_decoder *context)
         context->initialized = FLB_FALSE;
 
         if (dynamically_allocated) {
-            free(context);
+            flb_free(context);
         }
     }
 }
@@ -166,8 +180,15 @@ int flb_log_event_decoder_decode_timestamp(msgpack_object *input,
             return FLB_EVENT_DECODER_ERROR_WRONG_TIMESTAMP_TYPE;
         }
 
-        output->tm.tv_sec  = FLB_BSWAP_32(*((uint32_t *) &input->via.ext.ptr[0]));
-        output->tm.tv_nsec = FLB_BSWAP_32(*((uint32_t *) &input->via.ext.ptr[4]));
+        output->tm.tv_sec  = 
+            (int32_t) FLB_UINT32_TO_HOST_BYTE_ORDER(
+                        FLB_ALIGNED_DWORD_READ(
+                            (unsigned char *) &input->via.ext.ptr[0]));
+
+        output->tm.tv_nsec  = 
+            (int32_t) FLB_UINT32_TO_HOST_BYTE_ORDER(
+                        FLB_ALIGNED_DWORD_READ(
+                            (unsigned char *) &input->via.ext.ptr[4]));
     }
     else {
         return FLB_EVENT_DECODER_ERROR_WRONG_TIMESTAMP_TYPE;
@@ -261,42 +282,161 @@ int flb_event_decoder_decode_object(struct flb_log_event_decoder *context,
     return FLB_EVENT_DECODER_SUCCESS;
 }
 
+int flb_log_event_decoder_get_last_result(struct flb_log_event_decoder *context)
+{
+    if (context->last_result == FLB_EVENT_DECODER_ERROR_INSUFFICIENT_DATA &&
+        context->offset == context->length) {
+        context->last_result = FLB_EVENT_DECODER_SUCCESS;
+    }
+
+    return context->last_result;
+}
+
 int flb_log_event_decoder_next(struct flb_log_event_decoder *context,
                                struct flb_log_event *event)
 {
+    int ret;
+    int result;
+    int record_type;
     size_t previous_offset;
-    int    result;
-
-    context->record_base = NULL;
-    context->record_length = 0;
 
     if (context == NULL) {
         return FLB_EVENT_DECODER_ERROR_INVALID_CONTEXT;
     }
-
-    if (event == NULL) {
-        return FLB_EVENT_DECODER_ERROR_INVALID_ARGUMENT;
+    if (context->length == 0) {
+        context->last_result = FLB_EVENT_DECODER_ERROR_INSUFFICIENT_DATA;
+        return context->last_result;
     }
 
-    memset(event, 0, sizeof(struct flb_log_event));
+    context->record_base = NULL;
+    context->record_length = 0;
+
+    if (event == NULL) {
+        context->last_result = FLB_EVENT_DECODER_ERROR_INVALID_ARGUMENT;
+        return context->last_result;
+    }
 
     previous_offset = context->offset;
-
     result = msgpack_unpack_next(&context->unpacked_event,
                                  context->buffer,
                                  context->length,
                                  &context->offset);
 
     if (result == MSGPACK_UNPACK_CONTINUE) {
-        return FLB_EVENT_DECODER_ERROR_INSUFFICIENT_DATA;
+        context->last_result = FLB_EVENT_DECODER_ERROR_INSUFFICIENT_DATA;
+        return context->last_result;
     }
     else if (result != MSGPACK_UNPACK_SUCCESS) {
-        return FLB_EVENT_DECODER_ERROR_DESERIALIZATION_FAILURE;
+        context->last_result = FLB_EVENT_DECODER_ERROR_DESERIALIZATION_FAILURE;
+        return context->last_result;
     }
 
     context->previous_offset = previous_offset;
+    context->last_result = flb_event_decoder_decode_object(context,
+                                                           event,
+                                                           &context->unpacked_event.data);
 
-    return flb_event_decoder_decode_object(context,
-                                           event,
-                                           &context->unpacked_event.data);
+    if (context->last_result == FLB_EVENT_DECODER_SUCCESS) {
+        /* get log event type */
+        ret = flb_log_event_decoder_get_record_type(event, &record_type);
+        if (ret != 0) {
+            context->last_result = FLB_EVENT_DECODER_ERROR_DESERIALIZATION_FAILURE;
+            return context->last_result;
+        }
+
+        /*
+         * if we hava a group type record and the caller don't want groups, just
+         * skip this record and move to the next one.
+         */
+        if (record_type != FLB_LOG_EVENT_NORMAL && !context->read_groups) {
+            return flb_log_event_decoder_next(context, event);
+        }
+    }
+
+    return context->last_result;
+}
+
+int flb_log_event_decoder_get_record_type(struct flb_log_event *event, int32_t *type)
+{
+    int32_t s;
+
+    s = (int32_t) event->timestamp.tm.tv_sec;
+
+    if (s >= 0) {
+        *type = FLB_LOG_EVENT_NORMAL;
+        return 0;
+    }
+    else if (s == FLB_LOG_EVENT_GROUP_START) {
+        *type = FLB_LOG_EVENT_GROUP_START;
+        return 0;
+    }
+    else if (s == FLB_LOG_EVENT_GROUP_END) {
+        *type = FLB_LOG_EVENT_GROUP_END;
+        return 0;
+    }
+
+    return -1;
+}
+
+const char *flb_log_event_decoder_get_error_description(int error_code)
+{
+    const char *ret;
+
+    switch (error_code) {
+    case FLB_EVENT_DECODER_SUCCESS:
+        ret = "Success";
+        break;
+
+    case FLB_EVENT_DECODER_ERROR_INITIALIZATION_FAILURE:
+        ret = "Initialization failure";
+        break;
+
+    case FLB_EVENT_DECODER_ERROR_INVALID_CONTEXT:
+        ret = "Invalid context";
+        break;
+
+    case FLB_EVENT_DECODER_ERROR_INVALID_ARGUMENT:
+        ret = "Invalid argument";
+        break;
+
+    case FLB_EVENT_DECODER_ERROR_WRONG_ROOT_TYPE:
+        ret = "Wrong root type";
+        break;
+
+    case FLB_EVENT_DECODER_ERROR_WRONG_ROOT_SIZE:
+        ret = "Wrong root size";
+        break;
+
+    case FLB_EVENT_DECODER_ERROR_WRONG_HEADER_TYPE:
+        ret = "Wrong header type";
+        break;
+
+    case FLB_EVENT_DECODER_ERROR_WRONG_HEADER_SIZE:
+        ret = "Wrong header size";
+        break;
+
+    case FLB_EVENT_DECODER_ERROR_WRONG_TIMESTAMP_TYPE:
+        ret = "Wrong timestamp type";
+        break;
+
+    case FLB_EVENT_DECODER_ERROR_WRONG_METADATA_TYPE:
+        ret = "Wrong metadata type";
+        break;
+
+    case FLB_EVENT_DECODER_ERROR_WRONG_BODY_TYPE:
+        ret = "Wrong body type";
+        break;
+
+    case FLB_EVENT_DECODER_ERROR_DESERIALIZATION_FAILURE:
+        ret = "Deserialization failure";
+        break;
+
+    case FLB_EVENT_DECODER_ERROR_INSUFFICIENT_DATA:
+        ret = "Insufficient data";
+        break;
+
+    default:
+        ret = "Unknown error";
+    }
+    return ret;
 }

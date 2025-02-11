@@ -120,7 +120,11 @@ static inline int _mk_event_add(struct mk_event_ctx *ctx, int fd,
     event->status = MK_EVENT_REGISTERED;
 
     event->priority = MK_EVENT_PRIORITY_DEFAULT;
-    mk_list_entry_init(&event->_priority_head);
+
+    /* Remove from priority queue */
+    if (!mk_list_entry_is_orphan(&event->_priority_head)) {
+        mk_list_del(&event->_priority_head);
+    }
 
     if (type != MK_EVENT_UNMODIFIED) {
         event->type = type;
@@ -363,7 +367,7 @@ static inline int _mk_event_inject(struct mk_event_loop *loop,
 
     if (prevent_duplication) {
         for (index = 0 ; index < loop->n_events ; index++) {
-            if (ctx->fired[index]->fd == event->fd) {
+            if (ctx->fired[index].data == event) {
                 return 0;
             }
         }
@@ -371,7 +375,7 @@ static inline int _mk_event_inject(struct mk_event_loop *loop,
 
     event->mask = mask;
 
-    ctx->fired[loop->n_events] = event;
+    ctx->fired[loop->n_events].data = event;
 
     loop->n_events++;
 

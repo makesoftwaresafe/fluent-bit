@@ -20,11 +20,15 @@
 #include <cmetrics/cmetrics.h>
 #include <cmetrics/cmt_gauge.h>
 #include <cmetrics/cmt_counter.h>
+#include <cmetrics/cmt_untyped.h>
 #include <cmetrics/cmt_summary.h>
 #include <cmetrics/cmt_histogram.h>
 #include <cmetrics/cmt_encode_prometheus.h>
 #include <cmetrics/cmt_decode_opentelemetry.h>
 #include <cmetrics/cmt_encode_opentelemetry.h>
+#include <cmetrics/cmt_decode_prometheus_remote_write.h>
+#include <cmetrics/cmt_encode_prometheus_remote_write.h>
+#include <cmetrics/cmt_decode_statsd.h>
 
 #include "cmt_tests.h"
 
@@ -178,7 +182,56 @@ void test_opentelemetry()
     cmt_destroy(cmt);
 }
 
+void test_prometheus_remote_write()
+{
+    int ret;
+    struct cmt *decoded_context;
+    cfl_sds_t payload = read_file(CMT_TESTS_DATA_PATH "/remote_write_dump_originally_from_node_exporter.bin");
+
+    cmt_initialize();
+
+    ret = cmt_decode_prometheus_remote_write_create(&decoded_context, payload, cfl_sds_len(payload));
+    TEST_CHECK(ret == CMT_DECODE_PROMETHEUS_REMOTE_WRITE_SUCCESS);
+
+    cmt_decode_prometheus_remote_write_destroy(decoded_context);
+
+    cfl_sds_destroy(payload);
+}
+
+void test_statsd()
+{
+    int ret;
+    struct cmt *decoded_context;
+    cfl_sds_t payload = read_file(CMT_TESTS_DATA_PATH "/statsd_payload.txt");
+    size_t len = 0;
+    cfl_sds_t text = NULL;
+    int flags = 0;
+
+    /* For strtok_r, fill the last byte as \0. */
+    len = cfl_sds_len(payload);
+    cfl_sds_set_len(payload, len + 1);
+    payload[len] = '\0';
+
+    cmt_initialize();
+
+    flags |= CMT_DECODE_STATSD_GAUGE_OBSERVER;
+
+    ret = cmt_decode_statsd_create(&decoded_context, payload, cfl_sds_len(payload), flags);
+    TEST_CHECK(ret == CMT_DECODE_PROMETHEUS_REMOTE_WRITE_SUCCESS);
+    text = cmt_encode_prometheus_create(decoded_context, CMT_FALSE);
+
+    printf("%s\n", text);
+    cmt_encode_prometheus_destroy(text);
+
+    cmt_decode_statsd_destroy(decoded_context);
+
+    cfl_sds_destroy(payload);
+}
+
+
 TEST_LIST = {
     {"opentelemetry", test_opentelemetry},
+    {"prometheus_remote_write", test_prometheus_remote_write},
+    {"statsd", test_statsd},
     { 0 }
 };

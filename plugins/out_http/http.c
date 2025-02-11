@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -178,7 +178,6 @@ static int http_post(struct flb_out_http *ctx,
     }
     else if ((ctx->out_format == FLB_PACK_JSON_FORMAT_JSON) ||
         (ctx->out_format == FLB_PACK_JSON_FORMAT_STREAM) ||
-        (ctx->out_format == FLB_PACK_JSON_FORMAT_LINES) ||
         (ctx->out_format == FLB_HTTP_OUT_GELF)) {
         flb_http_add_header(c,
                             FLB_HTTP_CONTENT_TYPE,
@@ -186,7 +185,14 @@ static int http_post(struct flb_out_http *ctx,
                             FLB_HTTP_MIME_JSON,
                             sizeof(FLB_HTTP_MIME_JSON) - 1);
     }
-    else {
+    else if (ctx->out_format == FLB_PACK_JSON_FORMAT_LINES) {
+        flb_http_add_header(c,
+                            FLB_HTTP_CONTENT_TYPE,
+                            sizeof(FLB_HTTP_CONTENT_TYPE) - 1,
+                            FLB_HTTP_MIME_NDJSON,
+                            sizeof(FLB_HTTP_MIME_NDJSON) - 1);
+    }
+    else if (ctx->out_format == FLB_HTTP_OUT_MSGPACK) {
         flb_http_add_header(c,
                             FLB_HTTP_CONTENT_TYPE,
                             sizeof(FLB_HTTP_CONTENT_TYPE) - 1,
@@ -226,7 +232,7 @@ static int http_post(struct flb_out_http *ctx,
 #ifdef FLB_HAVE_AWS
     /* AWS SigV4 headers */
     if (ctx->has_aws_auth == FLB_TRUE) {
-        flb_plg_debug(ctx->ins, "signing request with AWS Sigv4");        
+        flb_plg_debug(ctx->ins, "signing request with AWS Sigv4");
         signature = flb_signv4_do(c,
                                   FLB_TRUE,  /* normalize URI ? */
                                   FLB_TRUE,  /* add x-amz-date header ? */
@@ -270,7 +276,16 @@ static int http_post(struct flb_out_http *ctx,
                 flb_plg_error(ctx->ins, "%s:%i, HTTP status=%i",
                               ctx->host, ctx->port, c->resp.status);
             }
-            out_ret = FLB_RETRY;
+            if (c->resp.status >= 400 && c->resp.status < 500 &&
+                c->resp.status != 429 && c->resp.status != 408) {
+                flb_plg_warn(ctx->ins, "could not flush records to %s:%i (http_do=%i), "
+                                "chunk will not be retried",
+                                ctx->host, ctx->port, ret);
+                out_ret = FLB_ERROR;
+            }
+            else {
+                out_ret = FLB_RETRY;
+            }
         }
         else {
             if (ctx->log_response_payload &&
@@ -503,7 +518,7 @@ static int post_all_requests(struct flb_out_http *ctx,
         return -1;
     }
 
-    while ((ret = flb_log_event_decoder_next(
+    while ((flb_log_event_decoder_next(
                     &log_decoder,
                     &log_event)) == FLB_EVENT_DECODER_SUCCESS) {
         headers = NULL;
@@ -645,7 +660,7 @@ static struct flb_config_map config_map[] = {
      "Set HTTP auth password"
     },
 #ifdef FLB_HAVE_SIGNV4
-#ifdef FLB_HAVE_AWS 
+#ifdef FLB_HAVE_AWS
     {
      FLB_CONFIG_MAP_BOOL, "aws_auth", "false",
      0, FLB_TRUE, offsetof(struct flb_out_http, has_aws_auth),
@@ -665,8 +680,8 @@ static struct flb_config_map config_map[] = {
      "Set a HTTP header which value is the Tag"
     },
     {
-     FLB_CONFIG_MAP_STR, "format", NULL,
-     0, FLB_FALSE, 0,
+     FLB_CONFIG_MAP_STR, "format", "json",
+     0, FLB_TRUE, offsetof(struct flb_out_http, format),
      "Set desired payload format: json, json_stream, json_lines, gelf or msgpack"
     },
     {

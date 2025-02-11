@@ -124,6 +124,11 @@ static int unpack_instrumentation_scope_attributes(mpack_reader_t *reader, size_
             return CTR_DECODE_MSGPACK_VARIANT_DECODE_ERROR;
         }
 
+        if (context->scope_span->instrumentation_scope->attr != NULL) {
+            ctr_attributes_destroy(context->scope_span->instrumentation_scope->attr);
+            context->scope_span->instrumentation_scope->attr = NULL;
+        }
+
         context->scope_span->instrumentation_scope->attr = attributes;
     }
 
@@ -132,6 +137,8 @@ static int unpack_instrumentation_scope_attributes(mpack_reader_t *reader, size_
 
 static int unpack_scope_span_instrumentation_scope(mpack_reader_t *reader, size_t index, void *ctx)
 {
+    mpack_type_t                          tag_type;
+    int                                   result;
     struct ctrace_instrumentation_scope  *instrumentation_scope;
     struct ctr_msgpack_decode_context    *context = ctx;
     struct ctr_mpack_map_entry_callback_t callbacks[] = \
@@ -143,6 +150,12 @@ static int unpack_scope_span_instrumentation_scope(mpack_reader_t *reader, size_
             {NULL,                       NULL}
         };
 
+    tag_type = ctr_mpack_peek_type(reader);
+
+    if (tag_type == mpack_type_nil) {
+        return ctr_mpack_consume_nil_tag(reader);
+    }
+
     instrumentation_scope = ctr_instrumentation_scope_create(NULL, NULL, 0, NULL);
 
     if (instrumentation_scope == NULL) {
@@ -151,7 +164,14 @@ static int unpack_scope_span_instrumentation_scope(mpack_reader_t *reader, size_
 
     ctr_scope_span_set_instrumentation_scope(context->scope_span, instrumentation_scope);
 
-    return ctr_mpack_unpack_map(reader, callbacks, ctx);
+    result = ctr_mpack_unpack_map(reader, callbacks, ctx);
+
+    if (result != CTR_DECODE_MSGPACK_SUCCESS) {
+        ctr_instrumentation_scope_destroy(context->scope_span->instrumentation_scope);
+        context->scope_span->instrumentation_scope = NULL;
+    }
+
+    return result;
 }
 
 /* Event callbacks */
@@ -502,6 +522,20 @@ static int unpack_span_dropped_attributes_count(mpack_reader_t *reader, size_t i
     return ctr_mpack_consume_uint32_tag(reader, &context->span->dropped_attr_count);
 }
 
+static int unpack_span_dropped_events_count(mpack_reader_t *reader, size_t index, void *ctx)
+{
+    struct ctr_msgpack_decode_context *context = ctx;
+
+    return ctr_mpack_consume_uint32_tag(reader, &context->span->dropped_events_count);
+}
+
+static int unpack_span_dropped_links_count(mpack_reader_t *reader, size_t index, void *ctx)
+{
+    struct ctr_msgpack_decode_context *context = ctx;
+
+    return ctr_mpack_consume_uint32_tag(reader, &context->span->dropped_links_count);
+}
+
 static int unpack_span_events(mpack_reader_t *reader, size_t index, void *ctx)
 {
     return ctr_mpack_unpack_array(reader, unpack_event, ctx);
@@ -539,8 +573,16 @@ static int unpack_span_status(mpack_reader_t *reader, size_t index, void *ctx)
     return ctr_mpack_unpack_map(reader, callbacks, ctx);
 }
 
+static int unpack_span_schema_url(mpack_reader_t *reader, size_t index, void *ctx)
+{
+    struct ctr_msgpack_decode_context *context = ctx;
+
+    return ctr_mpack_consume_string_or_nil_tag(reader, &context->span->schema_url);
+}
+
 static int unpack_span(mpack_reader_t *reader, size_t index, void *ctx)
 {
+    int result;
     struct ctr_msgpack_decode_context    *context = ctx;
     struct ctr_mpack_map_entry_callback_t callbacks[] = \
         {
@@ -554,9 +596,12 @@ static int unpack_span(mpack_reader_t *reader, size_t index, void *ctx)
             {"end_time_unix_nano",       unpack_span_end_time_unix_nano},
             {"attributes",               unpack_span_attributes},
             {"dropped_attributes_count", unpack_span_dropped_attributes_count},
+            {"dropped_events_count",     unpack_span_dropped_events_count},
+            {"dropped_links_count",      unpack_span_dropped_links_count},
             {"events",                   unpack_span_events},
             {"links",                    unpack_span_links},
             {"status",                   unpack_span_status},
+            {"schema_url",               unpack_span_schema_url},
             {NULL,                       NULL}
         };
 
@@ -565,8 +610,14 @@ static int unpack_span(mpack_reader_t *reader, size_t index, void *ctx)
     if (context->span == NULL) {
         return CTR_DECODE_MSGPACK_ALLOCATION_ERROR;
     }
+    result = ctr_mpack_unpack_map(reader, callbacks, ctx);
 
-    return ctr_mpack_unpack_map(reader, callbacks, ctx);
+    if (result != CTR_DECODE_MSGPACK_SUCCESS) {
+        ctr_span_destroy(context->span);
+        context->span = NULL;
+    }
+
+    return result;
 }
 
 /* Scope span callbacks */
@@ -591,6 +642,7 @@ static int unpack_scope_span_schema_url(mpack_reader_t *reader, size_t index, vo
 
 static int unpack_scope_span(mpack_reader_t *reader, size_t index, void *ctx)
 {
+    int result;
     struct ctr_msgpack_decode_context    *context = ctx;
     struct ctr_mpack_map_entry_callback_t callbacks[] = \
         {
@@ -606,7 +658,12 @@ static int unpack_scope_span(mpack_reader_t *reader, size_t index, void *ctx)
         return CTR_DECODE_MSGPACK_ALLOCATION_ERROR;
     }
 
-    return ctr_mpack_unpack_map(reader, callbacks, ctx);
+    result = ctr_mpack_unpack_map(reader, callbacks, ctx);
+    if (result != CTR_DECODE_MSGPACK_SUCCESS) {
+	ctr_scope_span_destroy(context->scope_span);
+	context->scope_span = NULL;
+    }
+    return result;
 }
 
 /* Resource span callbacks */

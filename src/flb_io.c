@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -109,6 +109,7 @@ int flb_io_net_connect(struct flb_connection *connection,
     int ret;
     int async = FLB_FALSE;
     flb_sockfd_t fd = -1;
+    int flags = flb_connection_get_flags(connection);
     // struct flb_upstream *u = u_conn->u;
 
     if (connection->fd > 0) {
@@ -119,7 +120,7 @@ int flb_io_net_connect(struct flb_connection *connection,
     }
 
     /* Check which connection mode must be done */
-    if (coro) {
+    if (coro && (flags & FLB_IO_ASYNC)) {
         async = flb_upstream_is_async(connection->upstream);
     }
     else {
@@ -155,6 +156,18 @@ int flb_io_net_connect(struct flb_connection *connection,
                   connection->upstream->tcp_port);
     }
 
+    /* set TCP keepalive and it's options */
+    if (connection->net->tcp_keepalive) {
+        ret = flb_net_socket_tcp_keepalive(connection->fd,
+                                           connection->net);
+
+        if (ret == -1) {
+            flb_socket_close(fd);
+
+            return -1;
+        }
+    }
+
 #ifdef FLB_HAVE_TLS
     /* Check if TLS was enabled, if so perform the handshake */
     if (flb_stream_is_secure(connection->stream) &&
@@ -172,6 +185,23 @@ int flb_io_net_connect(struct flb_connection *connection,
     flb_trace("[io] connection OK");
 
     return 0;
+}
+
+static void net_io_propagate_critical_error(
+                struct flb_connection *connection)
+{
+    switch (errno) {
+    case EBADF:
+    case ECONNRESET:
+    case EDESTADDRREQ:
+    case ENOTCONN:
+    case EPIPE:
+    case EACCES:
+    case ENOTTY:
+    case ENETDOWN:
+    case ENETUNREACH:
+        connection->net_error = errno;
+    }
 }
 
 static int fd_io_write(int fd, struct sockaddr_storage *address,
@@ -204,7 +234,13 @@ static int net_io_write(struct flb_connection *connection,
         }
     }
 
-    return fd_io_write(connection->fd, address, data, len, out_len);
+    ret = fd_io_write(connection->fd, address, data, len, out_len);
+
+    if (ret == -1) {
+        net_io_propagate_critical_error(connection);
+    }
+
+    return ret;
 }
 
 static int fd_io_write(int fd, struct sockaddr_storage *address,
@@ -333,11 +369,11 @@ retry:
 
 #ifdef FLB_HAVE_TRACE
     if (bytes > 0) {
-        flb_trace("[io coro=%p] [fd %i] write_async(2)=%d (%lu/%lu)",
+        flb_trace("[io coro=%p] [fd %i] write_async(2)=%zd (%lu/%lu)",
                   co, connection->fd, bytes, total + bytes, len);
     }
     else {
-        flb_trace("[io coro=%p] [fd %i] write_async(2)=%d (%lu/%lu)",
+        flb_trace("[io coro=%p] [fd %i] write_async(2)=%zd (%lu/%lu)",
                   co, connection->fd, bytes, total, len);
     }
 #endif
@@ -430,6 +466,7 @@ retry:
             *out_len = total;
 
             net_io_restore_event(connection, &event_backup);
+            net_io_propagate_critical_error(connection);
 
             return -1;
         }
@@ -519,6 +556,9 @@ static ssize_t net_io_read(struct flb_connection *connection,
                      connection->net->io_timeout,
                      flb_connection_get_remote_address(connection));
         }
+        else {
+            net_io_propagate_critical_error(connection);
+        }
 
         return -1;
     }
@@ -596,6 +636,9 @@ static FLB_INLINE ssize_t net_io_read_async(struct flb_coro *co,
             connection->coroutine = NULL;
 
             goto retry_read;
+        }
+        else {
+            net_io_propagate_critical_error(connection);
         }
 
         ret = -1;

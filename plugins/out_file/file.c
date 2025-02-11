@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -576,7 +576,7 @@ static void cb_file_flush(struct flb_event_chunk *event_chunk,
             if (buf) {
                 fprintf(fp, "%s: [%"PRIu64".%09lu, %s]" NEWLINE,
                         event_chunk->tag,
-                        log_event.timestamp.tm.tv_sec, log_event.timestamp.tm.tv_nsec,
+                        (uint64_t) log_event.timestamp.tm.tv_sec, log_event.timestamp.tm.tv_nsec,
                         buf);
                 flb_free(buf);
             }

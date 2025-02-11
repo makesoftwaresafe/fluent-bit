@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,6 +26,7 @@
 #include <fluent-bit/flb_log_event.h>
 
 #include <msgpack.h>
+
 
 #define FLB_EVENT_DECODER_SUCCESS                        0
 #define FLB_EVENT_DECODER_ERROR_INITIALIZATION_FAILURE  -1
@@ -56,11 +57,16 @@ struct flb_log_event_decoder {
     const char       *buffer;
     size_t            offset;
     size_t            length;
+    int               last_result;
+    int               read_groups;
 };
 
 void flb_log_event_decoder_reset(struct flb_log_event_decoder *context,
                                  char *input_buffer,
                                  size_t input_length);
+
+int flb_log_event_decoder_read_groups(struct flb_log_event_decoder *context,
+                                      int read_groups);
 
 int flb_log_event_decoder_init(struct flb_log_event_decoder *context,
                                char *input_buffer,
@@ -77,8 +83,12 @@ int flb_log_event_decoder_decode_timestamp(msgpack_object *input,
 int flb_event_decoder_decode_object(struct flb_log_event_decoder *context,
                                     struct flb_log_event *event,
                                     msgpack_object *input);
-
+int flb_log_event_decoder_get_last_result(struct flb_log_event_decoder *context);
 int flb_log_event_decoder_next(struct flb_log_event_decoder *context,
                                struct flb_log_event *record);
+
+const char *flb_log_event_decoder_get_error_description(int error_code);
+
+int flb_log_event_decoder_get_record_type(struct flb_log_event *event, int32_t *type);
 
 #endif

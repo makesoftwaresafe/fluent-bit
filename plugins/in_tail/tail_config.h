@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -85,7 +85,10 @@ struct flb_tail_config {
     int read_from_head;        /* read new files from head     */
     int rotate_wait;           /* sec to wait on rotated files */
     int watcher_interval;      /* watcher interval             */
-    int ignore_older;          /* ignore fields older than X seconds        */
+    int ignore_older;          /* ignore fields older than X seconds */
+    int ignore_active_older_files; /* ignore files that exceed the ignore
+                                    * older limit even if they are already
+                                    * being ingested */
     time_t last_pending;       /* last time a 'pending signal' was emitted' */
     struct mk_list *path_list; /* list of paths to scan (glob) */
     flb_sds_t path_key;        /* key name of file path        */
@@ -93,6 +96,9 @@ struct flb_tail_config {
     int   skip_long_lines;     /* skip long lines              */
     int   skip_empty_lines;    /* skip empty lines (off)       */
     int   exit_on_eof;         /* exit fluent-bit on EOF, test */
+#ifdef __linux__
+    int   file_cache_advise;   /* Use posix_fadvise for file access */
+#endif
 
     int progress_check_interval;      /* watcher interval             */
     int progress_check_interval_nsec; /* watcher interval             */
@@ -107,6 +113,7 @@ struct flb_tail_config {
     struct flb_sqldb *db;
     int db_sync;
     int db_locking;
+    int compare_filename;
     flb_sds_t db_journal_mode;
     sqlite3_stmt *stmt_get_file;
     sqlite3_stmt *stmt_insert_file;

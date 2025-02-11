@@ -34,7 +34,7 @@ struct ctrace_span *ctr_span_create(struct ctrace *ctx, struct ctrace_scope_span
 
     /* allocate a spanc context */
     span = calloc(1, sizeof(struct ctrace_span));
-    if (!span) {
+    if (span == NULL) {
         ctr_errno();
         return NULL;
     }
@@ -45,14 +45,14 @@ struct ctrace_span *ctr_span_create(struct ctrace *ctx, struct ctrace_scope_span
 
     /* name */
     span->name = cfl_sds_create(name);
-    if (!span->name) {
+    if (span->name == NULL) {
         free(span);
         return NULL;
     }
 
     /* attributes */
     span->attr = ctr_attributes_create();
-    if (!span->attr) {
+    if (span->attr == NULL) {
         free(span);
         return NULL;
     }
@@ -116,7 +116,9 @@ int ctr_span_set_span_id(struct ctrace_span *span, void *buf, size_t len)
     if (!buf || len <= 0) {
         return -1;
     }
-
+    if (span->span_id != NULL) {
+        ctr_id_destroy(span->span_id);
+    }
     span->span_id = ctr_id_create(buf, len);
     if (!span->span_id) {
         return -1;
@@ -193,6 +195,20 @@ char *ctr_span_kind_string(struct ctrace_span *span)
  * Span attributes
  * ---------------
  */
+int ctr_span_set_attributes(struct ctrace_span *span, struct ctrace_attributes *attr)
+{
+    if (!attr) {
+        return -1;
+    }
+
+    if (span->attr) {
+        ctr_attributes_destroy(span->attr);
+    }
+
+    span->attr = attr;
+    return 0;
+}
+
 int ctr_span_set_attribute_string(struct ctrace_span *span, char *key, char *value)
 {
     return ctr_attributes_set_string(span->attr, key, value);
@@ -276,9 +292,48 @@ int ctr_span_set_status(struct ctrace_span *span, int code, char *message)
     return 0;
 }
 
+int ctr_span_set_trace_state(struct ctrace_span *span, char *state, int len)
+{
+    if (span->trace_state) {
+        cfl_sds_destroy(span->trace_state);
+    }
+
+    span->trace_state = cfl_sds_create_len(state, len);
+    if (!span->trace_state) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int ctr_span_set_flags(struct ctrace_span *span, uint32_t flags)
+{
+    span->flags = flags;
+    return 0;
+}
+
+void ctr_span_set_schema_url(struct ctrace_span *span, char *url)
+{
+    if (span->schema_url) {
+        cfl_sds_destroy(span->schema_url);
+    }
+
+    span->schema_url = cfl_sds_create(url);
+}
+
+void ctr_span_set_dropped_link_count(struct ctrace_span *span, uint32_t count)
+{
+    span->dropped_links_count = count;
+}
+
 void ctr_span_set_dropped_events_count(struct ctrace_span *span, uint32_t count)
 {
     span->dropped_events_count = count;
+}
+
+void ctr_span_set_dropped_links_count(struct ctrace_span *span, uint32_t count)
+{
+    span->dropped_links_count = count;
 }
 
 void ctr_span_set_dropped_attributes_count(struct ctrace_span *span, uint32_t count)
@@ -294,25 +349,32 @@ void ctr_span_destroy(struct ctrace_span *span)
     struct ctrace_span_status *status;
     struct ctrace_link *link;
 
-    if (span->name) {
+    if (span->name != NULL) {
         cfl_sds_destroy(span->name);
     }
 
-    if (span->trace_id) {
+    if (span->trace_id != NULL) {
         ctr_id_destroy(span->trace_id);
     }
 
-    if (span->span_id) {
+    if (span->span_id != NULL) {
         ctr_id_destroy(span->span_id);
     }
 
-    if (span->parent_span_id) {
+    if (span->parent_span_id != NULL) {
         ctr_id_destroy(span->parent_span_id);
     }
 
     /* attributes */
-    if (span->attr) {
+    if (span->attr != NULL) {
         ctr_attributes_destroy(span->attr);
+    }
+    if (span->trace_state != NULL) {
+        cfl_sds_destroy(span->trace_state);
+    }
+
+    if (span->schema_url != NULL) {
+        cfl_sds_destroy(span->schema_url);
     }
 
     /* events */
@@ -329,7 +391,7 @@ void ctr_span_destroy(struct ctrace_span *span)
 
     /* status */
     status = &span->status;
-    if (status->message) {
+    if (status->message != NULL) {
         cfl_sds_destroy(status->message);
     }
 
@@ -346,21 +408,21 @@ struct ctrace_span_event *ctr_span_event_add_ts(struct ctrace_span *span, char *
 {
     struct ctrace_span_event *ev;
 
-    if (!name) {
+    if (name == NULL) {
         return NULL;
     }
 
     ev = calloc(1, sizeof(struct ctrace_span_event));
-    if (!ev) {
+    if (ev == NULL) {
         ctr_errno();
         return NULL;
     }
     ev->name = cfl_sds_create(name);
-    if (!ev->name) {
+    if (ev->name == NULL) {
         free(ev);
         return NULL;
     }
-    ev->attr = ctr_attributes_create(128);
+    ev->attr = ctr_attributes_create();
     ev->dropped_attr_count = 0;
 
     /* if no timestamp is given, use the current time */
@@ -411,6 +473,20 @@ int ctr_span_event_set_attribute_kvlist(struct ctrace_span_event *event, char *k
 {
 
     return ctr_attributes_set_kvlist(event->attr, key, value);
+}
+
+int ctr_span_event_set_attributes(struct ctrace_span_event *event, struct ctrace_attributes *attr)
+{
+    if (!attr) {
+        return -1;
+    }
+
+    if (event->attr) {
+        ctr_attributes_destroy(event->attr);
+    }
+
+    event->attr = attr;
+    return 0;
 }
 
 void ctr_span_event_set_dropped_attributes_count(struct ctrace_span_event *event, uint32_t count)

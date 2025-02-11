@@ -136,6 +136,12 @@ static void pack_attributes(mpack_writer_t *writer, struct ctrace_attributes *at
 
 static void pack_instrumentation_scope(mpack_writer_t *writer, struct ctrace_instrumentation_scope *ins_scope)
 {
+    if (ins_scope == NULL) {
+        mpack_write_nil(writer);
+
+        return;
+    }
+
     mpack_start_map(writer, 4);
 
     /* name */
@@ -301,7 +307,7 @@ static void pack_links(mpack_writer_t *writer, struct cfl_list *links)
 
 static void pack_span(mpack_writer_t *writer, struct ctrace_span *span)
 {
-    mpack_start_map(writer, 13);
+    mpack_start_map(writer, 16);
 
     /* trace_id */
     mpack_write_cstr(writer, "trace_id");
@@ -358,6 +364,14 @@ static void pack_span(mpack_writer_t *writer, struct ctrace_span *span)
     mpack_write_cstr(writer, "dropped_attributes_count");
     mpack_write_u32(writer, span->dropped_attr_count);
 
+    /* dropped_events_count */
+    mpack_write_cstr(writer, "dropped_events_count");
+    mpack_write_u32(writer, span->dropped_events_count);
+
+    /* dropped_links_count */
+    mpack_write_cstr(writer, "dropped_links_count");
+    mpack_write_u32(writer, span->dropped_links_count);
+
     /* events */
     mpack_write_cstr(writer, "events");
     pack_events(writer, &span->events);
@@ -365,6 +379,15 @@ static void pack_span(mpack_writer_t *writer, struct ctrace_span *span)
     /* links */
     mpack_write_cstr(writer, "links");
     pack_links(writer, &span->links);
+
+    /* schema_url */
+    mpack_write_cstr(writer, "schema_url");
+    if (span->schema_url) {
+        mpack_write_str(writer, span->schema_url, cfl_sds_len(span->schema_url));
+    }
+    else {
+        mpack_write_nil(writer);
+    }
 
     /* span_status */
     mpack_write_cstr(writer, "status");
@@ -418,7 +441,12 @@ static void pack_scope_spans(mpack_writer_t *writer, struct cfl_list *scope_span
 
         /* scope */
         mpack_write_cstr(writer, "scope");
-        pack_instrumentation_scope(writer, scope_span->instrumentation_scope);
+        if (scope_span->instrumentation_scope != NULL) {
+            pack_instrumentation_scope(writer, scope_span->instrumentation_scope);
+        }
+        else {
+            mpack_write_nil(writer);
+        }
 
         /* spans */
         mpack_write_cstr(writer, "spans");

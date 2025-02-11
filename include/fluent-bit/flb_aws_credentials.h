@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -118,12 +118,13 @@ struct flb_aws_provider_vtable {
  */
 struct flb_aws_provider {
     /*
-     * Fluent Bit is single-threaded but asynchonous. Co-routines are paused
-     * and resumed during blocking IO calls.
-     *
+     * Fluent Bit now has multi-threads/workers, need to a mutex to protect cred provider.
      * When a refresh is needed, only one co-routine should refresh.
+     * When one thread refreshes, the cached creds are freed and reset, there could be a double
+     * free without a lock.
+     * We use trylock to prevent deadlock.
      */
-    int locked;
+    pthread_mutex_t lock;
 
     struct flb_aws_provider_vtable *provider_vtable;
 

@@ -1,6 +1,8 @@
 #!/bin/bash
 set -eux
 
+# Used to update a Debian Apt repo, e.g. during a staging build or release process
+
 # Where the base of all the repos is
 BASE_PATH=${BASE_PATH:?}
 if [[ ! -d "$BASE_PATH" ]]; then
@@ -58,17 +60,17 @@ count=$(find "$REPO_DIR" -maxdepth 1 -type f -name "*.deb" | wc -l)
 if [[ $count != 0 ]] ; then
     # Do not remove files as we need them from moving to staging-release
     aptly -config="$APTLY_CONFIG" repo add -force-replace "$APTLY_REPO_NAME" "$REPO_DIR/"
+    aptly -config="$APTLY_CONFIG" repo show "$APTLY_REPO_NAME"
+
+    if [[ "$DISABLE_SIGNING" != "true" ]]; then
+        aptly -config="$APTLY_CONFIG" publish repo -gpg-key="$GPG_KEY" -origin="$APTLY_ORIGIN" -label="$APTLY_LABEL" "$APTLY_REPO_NAME"
+    else
+        aptly -config="$APTLY_CONFIG" publish repo --skip-signing -origin="$APTLY_ORIGIN" -label="$APTLY_LABEL" "$APTLY_REPO_NAME"
+    fi
+
+    rsync -av "$APTLY_ROOTDIR"/public/* "$REPO_DIR"
+    # Remove unnecessary files
+    rm -rf "$REPO_DIR/conf/" "$REPO_DIR/db/" "$APTLY_ROOTDIR" "$APTLY_CONFIG"
 else
     echo "WARNING: no files to add in $DEB_REPO for $CODENAME"
 fi
-aptly -config="$APTLY_CONFIG" repo show "$APTLY_REPO_NAME"
-
-if [[ "$DISABLE_SIGNING" != "true" ]]; then
-    aptly -config="$APTLY_CONFIG" publish repo -gpg-key="$GPG_KEY" -origin="$APTLY_ORIGIN" -label="$APTLY_LABEL" "$APTLY_REPO_NAME"
-else
-    aptly -config="$APTLY_CONFIG" publish repo --skip-signing -origin="$APTLY_ORIGIN" -label="$APTLY_LABEL" "$APTLY_REPO_NAME"
-fi
-
-rsync -av "$APTLY_ROOTDIR"/public/* "$REPO_DIR"
-# Remove unnecessary files
-rm -rf "$REPO_DIR/conf/" "$REPO_DIR/db/" "$APTLY_ROOTDIR" "$APTLY_CONFIG"

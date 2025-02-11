@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -139,7 +139,16 @@ static int in_mqtt_exit(void *data, struct flb_config *config)
 
 /* Configuration properties map */	
 static struct flb_config_map config_map[] = {	
-        	
+    {
+     FLB_CONFIG_MAP_STR, "payload_key", NULL,
+     0, FLB_TRUE, offsetof(struct flb_in_mqtt_config, payload_key),
+     "Key where the payload will be preserved"
+    },
+    {
+     FLB_CONFIG_MAP_SIZE, "buffer_size", MQTT_CONNECTION_DEFAULT_BUFFER_SIZE,
+     0, FLB_TRUE, offsetof(struct flb_in_mqtt_config, buffer_size),
+     "Maximum payload size"
+    },
     /* EOF */	
     {0}	
 };

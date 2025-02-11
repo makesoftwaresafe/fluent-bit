@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -100,12 +100,13 @@ int produce_message(struct flb_time *tm, msgpack_object *map,
     char *dynamic_topic;
     char *message_key = NULL;
     size_t message_key_len = 0;
+    flb_sds_t raw_key = NULL;
     struct flb_kafka_topic *topic = NULL;
     msgpack_sbuffer mp_sbuf;
     msgpack_packer mp_pck;
     msgpack_object key;
     msgpack_object val;
-    flb_sds_t s;
+    flb_sds_t s = NULL;
 
 #ifdef FLB_HAVE_AVRO_ENCODER
     // used to flag when a buffer needs to be freed for avro
@@ -211,6 +212,14 @@ int produce_message(struct flb_time *tm, msgpack_object *map,
             }
         }
 
+        /* Lookup raw_log_key */
+        if (ctx->raw_log_key && ctx->format == FLB_KAFKA_FMT_RAW && !raw_key && val.type == MSGPACK_OBJECT_STR) {
+            if (key.via.str.size == ctx->raw_log_key_len &&
+                    strncmp(key.via.str.ptr, ctx->raw_log_key, ctx->raw_log_key_len) == 0) {
+                raw_key = flb_sds_create_len(val.via.str.ptr, val.via.str.size);
+            }
+        }
+
         /* Lookup key/topic */
         if (ctx->topic_key && !topic && val.type == MSGPACK_OBJECT_STR) {
             if (key.via.str.size == ctx->topic_key_len &&
@@ -227,9 +236,9 @@ int produce_message(struct flb_time *tm, msgpack_object *map,
                             flb_warn("',' not allowed in dynamic_kafka topic names");
                             continue;
                         }
-                        if (val.via.str.size > 64) {
-                            /* Don't allow length of dynamic kafka topics > 64 */
-                            flb_warn(" dynamic kafka topic length > 64 not allowed");
+                        if (val.via.str.size > 249) {
+                            /* Don't allow length of dynamic kafka topics > 249 */
+                            flb_warn(" dynamic kafka topic length > 249 not allowed");
                             continue;
                         }
                         dynamic_topic = flb_malloc(val.via.str.size + 1);
@@ -346,6 +355,15 @@ int produce_message(struct flb_time *tm, msgpack_object *map,
 
     }
 #endif
+    else if (ctx->format == FLB_KAFKA_FMT_RAW) {
+        if (raw_key == NULL) {
+            flb_plg_error(ctx->ins, "missing raw_log_key");
+            msgpack_sbuffer_destroy(&mp_sbuf);
+            return FLB_ERROR;
+        }
+        out_buf = raw_key;
+        out_size = flb_sds_len(raw_key);
+    }
 
     if (!message_key) {
         message_key = ctx->message_key;
@@ -363,6 +381,7 @@ int produce_message(struct flb_time *tm, msgpack_object *map,
             AVRO_FREE(avro_fast_buffer, out_buf)
         }
 #endif
+        flb_sds_destroy(raw_key);
         return FLB_ERROR;
     }
 
@@ -384,6 +403,7 @@ int produce_message(struct flb_time *tm, msgpack_object *map,
             AVRO_FREE(avro_fast_buffer, out_buf)
         }
 #endif
+        flb_sds_destroy(raw_key);
         /*
          * Unblock the flush requests so that the
          * engine could try sending data again.
@@ -455,6 +475,7 @@ int produce_message(struct flb_time *tm, msgpack_object *map,
         AVRO_FREE(avro_fast_buffer, out_buf)
     }
 #endif
+    flb_sds_destroy(raw_key);
 
     msgpack_sbuffer_destroy(&mp_sbuf);
     return FLB_OK;
@@ -642,6 +663,13 @@ static struct flb_config_map config_map[] = {
     //FLB_CONFIG_MAP_MULT, FLB_TRUE, offsetof(struct flb_out_kafka, rdkafka_opts),
     0,  FLB_FALSE, 0,
     "Set the kafka group_id."
+   },
+   {
+    FLB_CONFIG_MAP_STR, "raw_log_key", NULL,
+    0, FLB_TRUE, offsetof(struct flb_out_kafka, raw_log_key),
+    "By default, the whole log record will be sent to Kafka. "
+    "If you specify a key name with this option, then only the value of "
+    "that key will be sent to Kafka."
    },
    /* EOF */
    {0}

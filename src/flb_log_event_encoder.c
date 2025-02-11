@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -273,9 +273,8 @@ int flb_log_event_encoder_commit_record(struct flb_log_event_encoder *context)
     return result;
 }
 
-int flb_log_event_encoder_set_timestamp(
-        struct flb_log_event_encoder *context,
-        struct flb_time *timestamp)
+int flb_log_event_encoder_set_timestamp(struct flb_log_event_encoder *context,
+                                        struct flb_time *timestamp)
 {
     if (timestamp != NULL) {
         flb_time_copy(&context->timestamp, timestamp);
@@ -287,15 +286,12 @@ int flb_log_event_encoder_set_timestamp(
     return FLB_EVENT_ENCODER_SUCCESS;
 }
 
-int flb_log_event_encoder_set_current_timestamp(
-        struct flb_log_event_encoder *context)
+int flb_log_event_encoder_set_current_timestamp(struct flb_log_event_encoder *context)
 {
     return flb_log_event_encoder_set_timestamp(context, NULL);
 }
 
-int flb_log_event_encoder_append_metadata_values_unsafe(
-        struct flb_log_event_encoder *context,
-        ...)
+int flb_log_event_encoder_append_metadata_values_unsafe(struct flb_log_event_encoder *context, ...)
 {
     va_list arguments;
     int     result;
@@ -348,4 +344,100 @@ int flb_log_event_encoder_append_root_values_unsafe(
     va_end(arguments);
 
     return result;
+}
+
+const char *flb_log_event_encoder_get_error_description(int error_code)
+{
+    const char *ret;
+
+    switch (error_code) {
+    case FLB_EVENT_ENCODER_SUCCESS:
+        ret = "Success";
+        break;
+
+    case FLB_EVENT_ENCODER_ERROR_UNSPECIFIED:
+        ret = "Unspecified";
+        break;
+
+    case FLB_EVENT_ENCODER_ERROR_ALLOCATION_ERROR:
+        ret = "Allocation error";
+        break;
+
+    case FLB_EVENT_ENCODER_ERROR_INVALID_CONTEXT:
+        ret = "Invalid context";
+        break;
+
+    case FLB_EVENT_ENCODER_ERROR_INVALID_ARGUMENT:
+        ret = "Invalid argument";
+        break;
+
+    case FLB_EVENT_ENCODER_ERROR_SERIALIZATION_FAILURE:
+        ret = "Serialization failure";
+        break;
+
+    case FLB_EVENT_ENCODER_ERROR_INVALID_VALUE_TYPE:
+        ret = "Invalid value type";
+        break;
+
+    default:
+        ret = "Unknown error";
+    }
+
+    return ret;
+}
+
+
+int flb_log_event_encoder_group_init(struct flb_log_event_encoder *context)
+{
+    int ret;
+    struct flb_time tm;
+
+    ret = flb_log_event_encoder_begin_record(context);
+    if (ret != FLB_EVENT_ENCODER_SUCCESS) {
+        return -1;
+    }
+
+    flb_time_set(&tm, FLB_LOG_EVENT_GROUP_START, 0);
+    ret = flb_log_event_encoder_set_timestamp(context, &tm);
+    if (ret == -1) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int flb_log_event_encoder_group_header_end(struct flb_log_event_encoder *context)
+{
+    int ret;
+
+    ret = flb_log_event_encoder_commit_record(context);
+    if (ret == -1) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int flb_log_event_encoder_group_end(struct flb_log_event_encoder *context)
+{
+    int ret;
+    struct flb_time tm;
+
+    ret = flb_log_event_encoder_begin_record(context);
+    if (ret != FLB_EVENT_ENCODER_SUCCESS) {
+        return -1;
+    }
+
+    flb_time_set(&tm, FLB_LOG_EVENT_GROUP_END, 0);
+    ret = flb_log_event_encoder_set_timestamp(context, &tm);
+    if (ret == -1) {
+        return -1;
+    }
+
+    ret = flb_log_event_encoder_commit_record(context);
+    if (ret == -1) {
+        return -1;
+    }
+
+    return 0;
 }

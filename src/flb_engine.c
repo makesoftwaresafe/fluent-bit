@@ -2,7 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2015-2022 The Fluent Bit Authors
+ *  Copyright (C) 2015-2024 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
  *  limitations under the License.
  */
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -52,6 +53,8 @@
 #include <fluent-bit/flb_upstream.h>
 #include <fluent-bit/flb_downstream.h>
 #include <fluent-bit/flb_ring_buffer.h>
+#include <fluent-bit/flb_notification.h>
+#include <fluent-bit/flb_simd.h>
 
 #ifdef FLB_HAVE_METRICS
 #include <fluent-bit/flb_metrics_exporter.h>
@@ -202,32 +205,37 @@ static inline int handle_input_event(flb_pipefd_t fd, uint64_t ts,
         return -1;
     }
 
-    flb_input_coro_finished(config, ins_id);
+    flb_input_coro_finished(config, (int) ins_id);
     return 0;
 }
 
-static inline int handle_output_event(flb_pipefd_t fd, uint64_t ts,
-                                      struct flb_config *config)
+static inline double calculate_chunk_capacity_percent(struct flb_output_instance *ins)
+{
+    /* Currently, total_limit_size 0(K|M)B will be translated as no
+     * limit. So, we need to handle this situation to be unlimited. */
+    if (ins->total_limit_size <= 0) {
+        return 100.0;
+    }
+
+    return 100 * (1.0 - (ins->fs_backlog_chunks_size + ins->fs_chunks_size)/
+                  ((double)ins->total_limit_size));
+}
+
+static inline int handle_output_event(uint64_t ts,
+                                      struct flb_config *config,
+                                      uint64_t val)
 {
     int ret;
-    int bytes;
     int task_id;
     int out_id;
     int retries;
     int retry_seconds;
     uint32_t type;
     uint32_t key;
-    uint64_t val;
     char *name;
     struct flb_task *task;
     struct flb_task_retry *retry;
     struct flb_output_instance *ins;
-
-    bytes = flb_pipe_r(fd, &val, sizeof(val));
-    if (bytes == -1) {
-        flb_errno();
-        return -1;
-    }
 
     /* Get type and key */
     type = FLB_BITS_U64_HIGH(val);
@@ -318,6 +326,10 @@ static inline int handle_output_event(flb_pipefd_t fd, uint64_t ts,
                      flb_output_name(ins), out_id);
         }
 
+        cmt_gauge_set(ins->cmt_chunk_available_capacity_percent, ts,
+                      calculate_chunk_capacity_percent(ins),
+                      1, (char *[]) {name});
+
         flb_task_retry_clean(task, ins);
         flb_task_users_dec(task, FLB_TRUE);
     }
@@ -326,6 +338,10 @@ static inline int handle_output_event(flb_pipefd_t fd, uint64_t ts,
             /* cmetrics: output_dropped_records_total */
             cmt_counter_add(ins->cmt_dropped_records, ts, task->records,
                             1, (char *[]) {name});
+
+            cmt_gauge_set(ins->cmt_chunk_available_capacity_percent, ts,
+                          calculate_chunk_capacity_percent(ins),
+                          1, (char *[]) {name});
 
             /* OLD metrics API */
 #ifdef FLB_HAVE_METRICS
@@ -358,6 +374,10 @@ static inline int handle_output_event(flb_pipefd_t fd, uint64_t ts,
             cmt_counter_inc(ins->cmt_retries_failed, ts, 1, (char *[]) {name});
             cmt_counter_add(ins->cmt_dropped_records, ts, task->records,
                             1, (char *[]) {name});
+
+            cmt_gauge_set(ins->cmt_chunk_available_capacity_percent, ts,
+                          calculate_chunk_capacity_percent(ins),
+                          1, (char *[]) {name});
 
             /* OLD metrics API */
 #ifdef FLB_HAVE_METRICS
@@ -415,6 +435,10 @@ static inline int handle_output_event(flb_pipefd_t fd, uint64_t ts,
             cmt_counter_add(ins->cmt_retried_records, ts, task->records,
                             1, (char *[]) {name});
 
+            cmt_gauge_set(ins->cmt_chunk_available_capacity_percent, ts,
+                          calculate_chunk_capacity_percent(ins),
+                          1, (char *[]) {name});
+
             /* OLD metrics API: update the metrics since a new retry is coming */
 #ifdef FLB_HAVE_METRICS
             flb_metrics_sum(FLB_METRIC_OUT_RETRY, 1, ins->metrics);
@@ -428,6 +452,10 @@ static inline int handle_output_event(flb_pipefd_t fd, uint64_t ts,
         cmt_counter_add(ins->cmt_dropped_records, ts, task->records,
                         1, (char *[]) {name});
 
+        cmt_gauge_set(ins->cmt_chunk_available_capacity_percent, ts,
+                      calculate_chunk_capacity_percent(ins),
+                      1, (char *[]) {name});
+
         /* OLD API */
 #ifdef FLB_HAVE_METRICS
         flb_metrics_sum(FLB_METRIC_OUT_ERROR, 1, ins->metrics);
@@ -439,6 +467,52 @@ static inline int handle_output_event(flb_pipefd_t fd, uint64_t ts,
     }
 
     return 0;
+}
+
+static inline int handle_output_events(flb_pipefd_t fd,
+                                       struct flb_config *config)
+{
+    uint64_t values[FLB_ENGINE_OUTPUT_EVENT_BATCH_SIZE];
+    int      result;
+    int      bytes;
+    size_t   limit;
+    size_t   index;
+    uint64_t ts;
+
+    memset(&values, 0, sizeof(values));
+
+    bytes = flb_pipe_r(fd, &values, sizeof(values));
+
+    if (bytes == -1) {
+        flb_errno();
+        return -1;
+    }
+
+    limit = floor(bytes / sizeof(uint64_t));
+
+    ts = cfl_time_now();
+
+    for (index = 0 ;
+         index < limit &&
+         index < (sizeof(values) / sizeof(values[0])) ;
+         index++) {
+        if (values[index] == 0) {
+            break;
+        }
+
+        result = handle_output_event(ts, config, values[index]);
+    }
+
+    /* This is wrong, in one hand, if handle_output_event_ fails we should
+     * stop, on the other, we have already consumed the signals from the pipe
+     * so we have to do whatever we can with them.
+     *
+     * And a side effect is that since we have N results but we are not aborting
+     * as soon as we get an error there could be N results to this function which
+     * not only are we not ready to handle but is not even checked at the moment.
+    */
+
+    return result;
 }
 
 static inline int flb_engine_manager(flb_pipefd_t fd, struct flb_config *config)
@@ -474,7 +548,7 @@ static inline int flb_engine_manager(flb_pipefd_t fd, struct flb_config *config)
 static FLB_INLINE int flb_engine_handle_event(flb_pipefd_t fd, int mask,
                                               struct flb_config *config)
 {
-    int ret;
+    int64_t ret;
 
     /* flb_engine_shutdown was already initiated */
     if (config->is_running == FLB_FALSE) {
@@ -557,6 +631,9 @@ int flb_engine_failed(struct flb_config *config)
         flb_error("[engine] fail to dispatch FAILED message");
     }
 
+    /* Waiting flushing log */
+    sleep(1);
+
     return ret;
 }
 
@@ -617,6 +694,7 @@ int flb_engine_start(struct flb_config *config)
     struct flb_bucket_queue *evl_bktq;
     struct flb_sched *sched;
     struct flb_net_dns dns_ctx;
+    struct flb_notification *notification;
 
     /* Initialize the networking layer */
     flb_net_lib_init();
@@ -651,9 +729,9 @@ int flb_engine_start(struct flb_config *config)
      * to the local event loop 'evl'.
      */
     ret = mk_event_channel_create(config->evl,
-                                    &config->ch_self_events[0],
-                                    &config->ch_self_events[1],
-                                    &config->event_thread_init);
+                                  &config->ch_self_events[0],
+                                  &config->ch_self_events[1],
+                                  &config->event_thread_init);
     if (ret == -1) {
         flb_error("[engine] could not create engine thread channel");
         return -1;
@@ -696,6 +774,19 @@ int flb_engine_start(struct flb_config *config)
         return -1;
     }
 
+    ret = mk_event_channel_create(config->evl,
+                                  &config->notification_channels[0],
+                                  &config->notification_channels[1],
+                                  &config->notification_event);
+    if (ret == -1) {
+        flb_error("could not create main notification channel");
+
+        return -1;
+    }
+
+    config->notification_channels_initialized = FLB_TRUE;
+    config->notification_event.type = FLB_ENGINE_EV_NOTIFICATION;
+
     /* Initialize custom plugins */
     ret = flb_custom_init_all(config);
     if (ret == -1) {
@@ -708,6 +799,9 @@ int flb_engine_start(struct flb_config *config)
         flb_error("[engine] storage creation failed");
         return -1;
     }
+
+    /* Internals */
+    flb_info("[simd    ] %s", flb_simd_info());
 
     /* Init Metrics engine */
     cmt_initialize();
@@ -982,13 +1076,11 @@ int flb_engine_start(struct flb_config *config)
                 }
             }
             else if (event->type == FLB_ENGINE_EV_OUTPUT) {
-                ts = cfl_time_now();
-
                 /*
                  * Event originated by an output plugin. likely a Task return
                  * status.
                  */
-                handle_output_event(event->fd, ts, config);
+                handle_output_events(event->fd, config);
             }
             else if (event->type == FLB_ENGINE_EV_INPUT) {
                 ts = cfl_time_now();
@@ -998,6 +1090,15 @@ int flb_engine_start(struct flb_config *config)
                 flb_engine_drain_ring_buffer_signal_channel(event->fd);
 
                 rb_flush_flag = FLB_TRUE;
+            }
+            else if(event->type == FLB_ENGINE_EV_NOTIFICATION) {
+                ret = flb_notification_receive(event->fd, &notification);
+
+                if (ret == 0) {
+                    ret = flb_notification_deliver(notification);
+
+                    flb_notification_cleanup(notification);
+                }
             }
         }
 
@@ -1028,6 +1129,7 @@ int flb_engine_start(struct flb_config *config)
 /* Release all resources associated to the engine */
 int flb_engine_shutdown(struct flb_config *config)
 {
+    struct flb_sched_timer_coro_cb_params *sched_params;
 
     config->is_running = FLB_FALSE;
     flb_input_pause_all(config);
@@ -1042,10 +1144,17 @@ int flb_engine_shutdown(struct flb_config *config)
     flb_router_exit(config);
 
     /* cleanup plugins */
-    flb_input_exit_all(config);
     flb_filter_exit(config);
     flb_output_exit(config);
     flb_custom_exit(config);
+    flb_input_exit_all(config);
+
+    /* scheduler */
+    sched_params = (struct flb_sched_timer_coro_cb_params *) FLB_TLS_GET(sched_timer_coro_cb_params);
+    if (sched_params != NULL) {
+        flb_free(sched_params);
+        FLB_TLS_SET(sched_timer_coro_cb_params, NULL);
+    }
 
     /* Destroy the storage context */
     flb_storage_destroy(config);
@@ -1062,6 +1171,21 @@ int flb_engine_shutdown(struct flb_config *config)
         flb_hs_destroy(config->http_ctx);
     }
 #endif
+    if (config->evl) {
+        mk_event_channel_destroy(config->evl,
+                                 config->ch_self_events[0],
+                                 config->ch_self_events[1],
+                                 &config->event_thread_init);
+    }
+
+    if (config->notification_channels_initialized == FLB_TRUE) {
+        mk_event_channel_destroy(config->evl,
+                                 config->notification_channels[0],
+                                 config->notification_channels[1],
+                                 &config->notification_event);
+
+        config->notification_channels_initialized = FLB_FALSE;
+    }
 
     return 0;
 }

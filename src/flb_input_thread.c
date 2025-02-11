@@ -31,6 +31,7 @@
 #include <fluent-bit/flb_input.h>
 #include <fluent-bit/flb_input_plugin.h>
 #include <fluent-bit/flb_input_thread.h>
+#include <fluent-bit/flb_notification.h>
 
 static int input_thread_instance_set_status(struct flb_input_instance *ins, uint32_t status);
 static int input_thread_instance_get_status(struct flb_input_instance *ins);
@@ -76,6 +77,11 @@ static inline int handle_input_event(flb_pipefd_t fd, struct flb_input_instance 
         if (operation == FLB_INPUT_THREAD_PAUSE) {
             if (ins->p->cb_pause && ins->context) {
                 ins->p->cb_pause(ins->context, ins->config);
+            }
+        }
+        else if (operation == FLB_INPUT_THREAD_RESUME) {
+            if (ins->p->cb_resume) {
+                ins->p->cb_resume(ins->context, ins->config);
             }
         }
         else if (operation == FLB_INPUT_THREAD_EXIT) {
@@ -183,6 +189,15 @@ static FLB_INLINE int engine_handle_event(flb_pipefd_t fd, int mask,
 
 static void input_thread_instance_destroy(struct flb_input_thread_instance *thi)
 {
+    if (thi->notification_channels_initialized == FLB_TRUE) {
+        mk_event_channel_destroy(thi->evl,
+                                 thi->notification_channels[0],
+                                 thi->notification_channels[1],
+                                 &thi->notification_event);
+
+        thi->notification_channels_initialized = FLB_FALSE;
+    }
+
     if (thi->evl) {
         mk_event_loop_destroy(thi->evl);
     }
@@ -265,6 +280,24 @@ static struct flb_input_thread_instance *input_thread_instance_create(struct flb
     }
     thi->event_local.type = FLB_ENGINE_EV_THREAD_INPUT;
 
+    ret = mk_event_channel_create(thi->evl,
+                                  &thi->notification_channels[0],
+                                  &thi->notification_channels[1],
+                                  &thi->notification_event);
+    if (ret == -1) {
+        flb_error("could not create notification channel for %s",
+                  flb_input_name(ins));
+
+        input_thread_instance_destroy(thi);
+
+        return NULL;
+    }
+
+    thi->notification_channels_initialized = FLB_TRUE;
+    thi->notification_event.type = FLB_ENGINE_EV_NOTIFICATION;
+
+    ins->notification_channel = thi->notification_channels[1];
+
     /* create thread pool, just one worker */
     thi->tp = flb_tp_create(ins->config);
     if (!thi->tp) {
@@ -291,6 +324,7 @@ static void input_thread(void *data)
     struct flb_input_plugin *p;
     struct flb_sched *sched = NULL;
     struct flb_net_dns dns_ctx = {0};
+    struct flb_notification *notification;
 
     thi = (struct flb_input_thread_instance *) data;
     ins = thi->ins;
@@ -427,6 +461,15 @@ static void input_thread(void *data)
             else if (event->type == FLB_ENGINE_EV_THREAD_INPUT) {
                 handle_input_thread_event(event->fd, ins->config);
             }
+            else if(event->type == FLB_ENGINE_EV_NOTIFICATION) {
+                ret = flb_notification_receive(event->fd, &notification);
+
+                if (ret == 0) {
+                    ret = flb_notification_deliver(notification);
+
+                    flb_notification_cleanup(notification);
+                }
+            }
         }
 
         flb_net_dns_lookup_context_cleanup(&dns_ctx);
@@ -472,6 +515,31 @@ int flb_input_thread_instance_pause(struct flb_input_instance *ins)
     /* compose message to pause the thread */
     val = FLB_BITS_U64_SET(FLB_INPUT_THREAD_TO_THREAD,
                            FLB_INPUT_THREAD_PAUSE);
+
+    ret = flb_pipe_w(thi->ch_parent_events[1], &val, sizeof(val));
+    if (ret <= 0) {
+        flb_errno();
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * Signal the thread event loop to resume the running plugin instance. This function
+ * must be called only from the main thread/pipeline.
+ */
+int flb_input_thread_instance_resume(struct flb_input_instance *ins)
+{
+    int ret;
+    uint64_t val;
+    struct flb_input_thread_instance *thi = ins->thi;
+
+    flb_plg_debug(ins, "thread resume instance");
+
+    /* compose message to resume the thread */
+    val = FLB_BITS_U64_SET(FLB_INPUT_THREAD_TO_THREAD,
+                           FLB_INPUT_THREAD_RESUME);
 
     ret = flb_pipe_w(thi->ch_parent_events[1], &val, sizeof(val));
     if (ret <= 0) {
